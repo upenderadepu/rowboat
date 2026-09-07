@@ -3701,13 +3701,22 @@ export const ipcSchemas = {
     req: z.object({ orgId: z.string() }),
     res: z.object({ success: z.literal(true) }),
   },
+  // Shared spaces by default; includeDirect adds the member's DMs (kind
+  // 'direct') — opt-in on the wire so a pre-DM build never renders one as a space.
   'spaces:listSpaces': {
-    req: z.object({ orgId: z.string() }),
+    req: z.object({ orgId: z.string(), includeDirect: z.boolean().optional() }),
     res: z.object({ spaces: z.array(z.custom<SpacesTypes.Space>()) }),
   },
   'spaces:createSpace': {
     req: z.object({ orgId: z.string(), name: z.string() }),
     res: z.object({ space: z.custom<SpacesTypes.Space>() }),
+  },
+  // Direct messages: get-or-create the DM with another org member. No
+  // invite, no acceptance — the other side learns of it by a space_added
+  // frame on 'spaces:events' and shows it in their sidebar.
+  'spaces:openDirect': {
+    req: z.object({ orgId: z.string(), memberId: z.string() }),
+    res: z.object({ space: z.custom<SpacesTypes.Space>(), created: z.boolean() }),
   },
   'spaces:listMembers': {
     req: z.object({ orgId: z.string(), spaceId: z.string() }),

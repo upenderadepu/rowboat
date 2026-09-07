@@ -19,7 +19,8 @@ import { railKey, type RailSelection } from '@/lib/spaces-selection'
 import { ThreadPane } from '@/components/spaces/thread-pane'
 import { STREAM_READ_KEY, useSpacePresence, useStream } from '@/hooks/use-space-chat'
 import { refreshMembers, useSpaceMembers } from '@/hooks/use-space-members'
-import { useSpaceFeed, useSpaceLastReadAt, useSpaceLive, useSpacesOrgs, type OrgWithSpaces } from '@/hooks/use-spaces'
+import { findSpace, useSpaceFeed, useSpaceLastReadAt, useSpaceLive, useSpacesOrgs, type OrgWithSpaces } from '@/hooks/use-spaces'
+import { directLabel, otherParticipant } from '@/lib/spaces-direct'
 import { useSpaceNotifyPrefs, type NotifyLevel } from '@/hooks/use-spaces-notify'
 import { requestJump } from '@/lib/spaces-jump'
 import { chord } from '@/lib/shortcut'
@@ -105,7 +106,7 @@ export function SpacesView({ selection, onSelect, railSelection, onRailSelect, o
     const [addOrgOpen, setAddOrgOpen] = useState(false)
 
     const selectedOrg = selection ? (orgs.find((o) => o.id === selection.orgId) ?? null) : null
-    const selectedSpace = selection && selectedOrg ? (selectedOrg.spaces.find((s) => s.id === selection.spaceId) ?? null) : null
+    const selectedSpace = selection && selectedOrg ? (findSpace(selectedOrg, selection.spaceId) ?? null) : null
 
     // No (valid) selection: land on the first space there is.
     useEffect(() => {
@@ -211,6 +212,12 @@ function SpacePane({ org, space, selection, onSelect, onOpenSession, active = tr
     // names resolve in the same first frame as the stream's cached tail.
     const members = useSpaceMembers(org.id, space.id)
     const memberNames = useMemo(() => new Map(members.map((m) => [m.id, m.displayName])), [members])
+    // A direct message is this same pane with a two-person roster: named by
+    // the other person, no invites, every message notifies by default.
+    const isDirect = space.kind === 'direct'
+    const directOtherId = otherParticipant(space, org.memberId)
+    const spaceTitle = isDirect ? directLabel(space, members, org.memberId) : space.name
+    const notifyDefault: NotifyLevel = isDirect ? 'all' : 'mentions'
 
     // The artifacts rail: open by default when a thread has artifacts, collapsed
     // when it has none; a per-thread pin remembers a manual toggle.
@@ -638,9 +645,11 @@ function SpacePane({ org, space, selection, onSelect, onOpenSession, active = tr
                             className="flex h-9 max-w-[320px] shrink-0 items-center gap-2 rounded-md pl-1 pr-2 hover:bg-accent/60 data-[state=open]:bg-accent/60"
                         >
                             <OrgMonogram org={org} />
-                            <span className="flex min-w-0 items-center gap-0.5">
-                                <Hash className="size-4 shrink-0 text-muted-foreground" />
-                                <h1 className="truncate text-[15px] font-semibold">{space.name}</h1>
+                            <span className={cn('flex min-w-0 items-center', isDirect ? 'gap-1.5' : 'gap-0.5')}>
+                                {isDirect
+                                    ? <MemberAvatar id={directOtherId ?? space.id} name={spaceTitle} size="sm" />
+                                    : <Hash className="size-4 shrink-0 text-muted-foreground" />}
+                                <h1 className="truncate text-[15px] font-semibold">{spaceTitle}</h1>
                             </span>
                         </button>
                     </HoverCardTrigger>
@@ -651,11 +660,15 @@ function SpacePane({ org, space, selection, onSelect, onOpenSession, active = tr
                             belongs to, and who you are in it. */}
                         <div className="flex flex-col items-center text-center">
                             <OrgMonogram org={org} size="xl" />
-                            <div className="mt-3 flex items-center gap-0.5 text-lg font-semibold leading-tight">
-                                <Hash className="size-4 text-muted-foreground" />
-                                <span className="truncate">{space.name}</span>
+                            <div className={cn('mt-3 flex items-center text-lg font-semibold leading-tight', isDirect ? 'gap-1.5' : 'gap-0.5')}>
+                                {isDirect
+                                    ? <MemberAvatar id={directOtherId ?? space.id} name={spaceTitle} size="sm" />
+                                    : <Hash className="size-4 text-muted-foreground" />}
+                                <span className="truncate">{spaceTitle}</span>
                             </div>
-                            <div className="mt-0.5 text-xs text-muted-foreground">A space in {org.name}</div>
+                            <div className="mt-0.5 text-xs text-muted-foreground">
+                                {isDirect ? `A direct message in ${org.name} — just the two of you` : `A space in ${org.name}`}
+                            </div>
                         </div>
                         <dl className="mt-4 grid grid-cols-[auto_minmax(0,1fr)] items-center gap-x-3 gap-y-1.5 text-[13px]">
                             <dt className="text-right font-medium">Organization</dt>
@@ -724,15 +737,18 @@ function SpacePane({ org, space, selection, onSelect, onOpenSession, active = tr
                                 )
                             })}
                         </div>
-                        <div className="mt-1 border-t border-border pt-1">
-                            <button
-                                type="button"
-                                onClick={() => void invite()}
-                                className="flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-sm text-muted-foreground hover:bg-accent hover:text-foreground"
-                            >
-                                <LinkIcon className="size-3.5" /> Copy invite link
-                            </button>
-                        </div>
+                        {/* A DM's membership is fixed — there is nobody to invite. */}
+                        {!isDirect && (
+                            <div className="mt-1 border-t border-border pt-1">
+                                <button
+                                    type="button"
+                                    onClick={() => void invite()}
+                                    className="flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-sm text-muted-foreground hover:bg-accent hover:text-foreground"
+                                >
+                                    <LinkIcon className="size-3.5" /> Copy invite link
+                                </button>
+                            </div>
+                        )}
                     </PopoverContent>
                 </Popover>
                 <DropdownMenu>
@@ -741,7 +757,7 @@ function SpacePane({ org, space, selection, onSelect, onOpenSession, active = tr
                             type="button"
                             title={dndActive
                                 ? `Do not disturb until ${new Date(dndUntil!).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })}`
-                                : `Notifications — ${notifyChoices.find((c) => c.level === (notify.spaceLevel ?? 'mentions'))?.label ?? 'Mentions only'}`}
+                                : `Notifications — ${notifyChoices.find((c) => c.level === (notify.spaceLevel ?? notifyDefault))?.label ?? 'Mentions only'}`}
                             className={cn(
                                 'inline-flex size-7 items-center justify-center rounded-md hover:bg-accent',
                                 dndActive ? 'text-amber-600 dark:text-amber-400' : 'text-muted-foreground hover:text-foreground',
@@ -755,7 +771,7 @@ function SpacePane({ org, space, selection, onSelect, onOpenSession, active = tr
                         <DropdownMenuLabel className="text-xs font-normal text-muted-foreground">This space</DropdownMenuLabel>
                         {notifyChoices.map((c) => (
                             <DropdownMenuItem key={c.level} onClick={() => notify.setSpaceLevel(c.level)}>
-                                <Check className={cn('size-3.5 mr-2', (notify.spaceLevel ?? 'mentions') !== c.level && 'opacity-0')} /> {c.label}
+                                <Check className={cn('size-3.5 mr-2', (notify.spaceLevel ?? notifyDefault) !== c.level && 'opacity-0')} /> {c.label}
                             </DropdownMenuItem>
                         ))}
                         <DropdownMenuSeparator />
