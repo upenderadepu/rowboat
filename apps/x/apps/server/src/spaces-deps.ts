@@ -38,6 +38,10 @@ function emitSpacesEvent(event: spacesShared.SpacesBusEvent): void {
 
 const liveSubscriptions = new Map<string, () => void>();
 
+// Member-addressed frames (space_added) ride no space subscription — relay
+// them to every client as they arrive.
+orgs.onMemberFrame((orgId, frame) => emitSpacesEvent({ orgId, frame }));
+
 function orgSummary(record: orgs.OrgRecord): spacesShared.SpacesOrgSummary {
   return {
     id: record.id,
@@ -53,7 +57,7 @@ function orgSummary(record: orgs.OrgRecord): spacesShared.SpacesOrgSummary {
 type SpacesRpcChannel =
   | 'spaces:listOrgs' | 'spaces:addOrg' | 'spaces:resolveInviteLink' | 'spaces:joinInvite'
   | 'spaces:signInOrg' | 'spaces:createOrg' | 'spaces:apexInfo' | 'spaces:removeOrg'
-  | 'spaces:listSpaces' | 'spaces:createSpace' | 'spaces:listMembers' | 'spaces:createInvite'
+  | 'spaces:listSpaces' | 'spaces:createSpace' | 'spaces:openDirect' | 'spaces:listMembers' | 'spaces:createInvite'
   | 'spaces:resolveInvite' | 'spaces:acceptInvite' | 'spaces:listAssets' | 'spaces:moveAsset'
   | 'spaces:deleteAsset' | 'spaces:restoreAsset' | 'spaces:uploadBlob' | 'spaces:readAsset'
   | 'spaces:proposeChange' | 'spaces:assetHistory' | 'spaces:diff' | 'spaces:listTopics'
@@ -126,7 +130,7 @@ export const spacesRpcHandlers: SpacesHandlers = {
   },
 
   'spaces:listSpaces': async (args) => {
-    const spaces = await orgs.getClient(args.orgId).listSpaces();
+    const spaces = await orgs.getClient(args.orgId).listSpaces({ includeDirect: args.includeDirect ?? false });
     // The renderer just reached this org — if it was down at boot (or restarted),
     // this is the earliest signal that its spaces are watchable again. Unforced:
     // repeated refreshes collapse into one sync.
@@ -138,6 +142,12 @@ export const spacesRpcHandlers: SpacesHandlers = {
     const space = await orgs.getClient(args.orgId).createSpace(args.name);
     void syncSpaceMentionWatch({ force: true });
     return { space };
+  },
+
+  'spaces:openDirect': async (args) => {
+    const result = await orgs.getClient(args.orgId).openDirect(args.memberId);
+    if (result.created) void syncSpaceMentionWatch({ force: true });
+    return result;
   },
 
   'spaces:listMembers': async (args) => ({

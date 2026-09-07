@@ -841,6 +841,27 @@ export function countSpaceUnread(orgId: string, spaceId: string, selfMemberId: s
     return count
 }
 
+/**
+ * When something last happened in a space's chat — the sidebar's DM list
+ * sorts by it: the newest loaded root or reply, else the rail's newest topic
+ * activity, else null (callers fall back to the space's createdAt).
+ */
+export function spaceLastActivityAt(orgId: string, spaceId: string): string | null {
+    const state = streamState.get(key(orgId, spaceId))
+    let latest: string | null = null
+    if (state?.ready) {
+        for (const m of state.messages) {
+            if (m.pending || m.failed) continue
+            const at = m.lastReplyAt && m.lastReplyAt > m.postedAt ? m.lastReplyAt : m.postedAt
+            if (!latest || at > latest) latest = at
+        }
+    }
+    for (const t of getSpaceFeed(orgId, spaceId).topics) {
+        if (!latest || t.lastActivityAt > latest) latest = t.lastActivityAt
+    }
+    return latest
+}
+
 /** `${orgId}/${spaceId}` → unread count, for the sidebar badges. */
 export function useSpacesUnreadCounts(): Map<string, number> {
     const version = useSyncExternalStore(
@@ -856,7 +877,9 @@ export function useSpacesUnreadCounts(): Map<string, number> {
     return useMemo(() => {
         const counts = new Map<string, number>()
         for (const org of getSpacesOrgs()) {
-            for (const space of org.spaces) counts.set(key(org.id, space.id), countSpaceUnread(org.id, space.id, org.memberId))
+            for (const space of [...org.spaces, ...org.directs]) {
+                counts.set(key(org.id, space.id), countSpaceUnread(org.id, space.id, org.memberId))
+            }
         }
         return counts
         // eslint-disable-next-line react-hooks/exhaustive-deps

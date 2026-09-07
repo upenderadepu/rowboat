@@ -278,6 +278,7 @@ export const RPC_CHANNELS = [
   'spaces:removeOrg',
   'spaces:listSpaces',
   'spaces:createSpace',
+  'spaces:openDirect',
   'spaces:listMembers',
   'spaces:createInvite',
   'spaces:resolveInvite',

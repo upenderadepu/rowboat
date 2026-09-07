@@ -2,6 +2,7 @@ import fs from 'fs';
 import path from 'path';
 import * as oauthClient from '../auth/oauth-client.js';
 import { WorkDir } from '../config/config.js';
+import type { ServerFrame } from '@rowboat/spaces-protocol';
 import { SpacesClient } from './client.js';
 import { SpacesLive } from './live.js';
 
@@ -268,6 +269,22 @@ export function bounceAllLive(): void {
   for (const runtime of runtimes.values()) runtime.live.bounce();
 }
 
+type MemberFrameListener = (orgId: string, frame: ServerFrame) => void;
+const memberFrameListeners = new Set<MemberFrameListener>();
+
+/**
+ * Member-addressed live frames from EVERY org (`space_added`: someone opened
+ * a DM with us — direct messages 2026-09-07). One registration covers orgs
+ * added later too: each org's socket fans out to this set as it is created.
+ * Hosts relay these to the renderer; the mention watcher re-syncs on them.
+ */
+export function onMemberFrame(listener: MemberFrameListener): () => void {
+  memberFrameListeners.add(listener);
+  return () => {
+    memberFrameListeners.delete(listener);
+  };
+}
+
 /** The client pair for an org — created lazily, one WS per org for the process lifetime. */
 export function orgRuntime(orgId: string): OrgRuntime {
   const cached = runtimes.get(orgId);
@@ -279,6 +296,9 @@ export function orgRuntime(orgId: string): OrgRuntime {
     client: new SpacesClient({ baseUrl: org.baseUrl, token }),
     live: new SpacesLive({ baseUrl: org.baseUrl, token }),
   };
+  runtime.live.onMemberFrame((frame) => {
+    for (const listener of memberFrameListeners) listener(orgId, frame);
+  });
   runtimes.set(orgId, runtime);
   return runtime;
 }

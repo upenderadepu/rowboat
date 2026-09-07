@@ -71,7 +71,10 @@ import { SidebarCreditRewards } from "@/components/sidebar-credit-rewards"
 import { SPACES_ENABLED } from "@/lib/feature-flags"
 import { AddOrgDialog, OrgMonogram, type SpaceSelection } from "@/components/spaces-view"
 import { useSpacesOrgs, type OrgWithSpaces } from "@/hooks/use-spaces"
-import { useSpacesUnreadCounts } from "@/hooks/use-space-chat"
+import { prefetchStream, spaceLastActivityAt, useSpacesUnreadCounts } from "@/hooks/use-space-chat"
+import { MemberAvatar } from "@/components/spaces/atoms"
+import { NewDirectDialog } from "@/components/spaces/new-direct-dialog"
+import { otherParticipant, spaceDisplayName } from "@/lib/spaces-direct"
 import { MascotFaceIcon } from "@/components/talking-head"
 import { extractConferenceLink } from "@/lib/calendar-event"
 import { useBilling } from "@/hooks/useBilling"
@@ -874,7 +877,7 @@ export function DockSidebar({
     for (const count of spacesUnread.values()) sum += count
     return sum
   }, [spacesUnread])
-  const totalSpaces = useMemo(() => orgs.reduce((n, o) => n + o.spaces.length, 0), [orgs])
+  const totalSpaces = useMemo(() => orgs.reduce((n, o) => n + o.spaces.length + o.directs.length, 0), [orgs])
 
   // ----- data: sync status (for the Settings tooltip + activity popover) -----
   const { isSyncing, hasServiceErrors, statusLabel: syncStatusLabel, setServiceErrors } = useSyncStatus()
@@ -888,7 +891,7 @@ export function DockSidebar({
       last = JSON.parse(window.localStorage.getItem(LAST_SPACE_STORAGE_KEY) ?? 'null') as { orgId: string; spaceId: string } | null
     } catch { /* ignore */ }
     const isValid = last != null
-      && orgs.some((o) => o.id === last.orgId && o.spaces.some((s) => s.id === last.spaceId))
+      && orgs.some((o) => o.id === last.orgId && (o.spaces.some((s) => s.id === last.spaceId) || o.directs.some((s) => s.id === last.spaceId)))
     const target = isValid && last
       ? last
       : (() => {
@@ -1238,6 +1241,13 @@ export function DockSidebar({
               <ContextMenuItem key={`${org.id}/${space.id}`} onClick={() => onOpenSpace?.(org.id, space.id)}>
                 <MessagesSquare className="mr-2 size-3.5 text-muted-foreground" />
                 <span className="truncate">{space.name}</span>
+                {orgs.length > 1 && <span className="ml-2 truncate text-xs text-muted-foreground">{org.name}</span>}
+              </ContextMenuItem>
+            )))}
+            {orgs.flatMap((org) => org.directs.map((dm) => (
+              <ContextMenuItem key={`${org.id}/${dm.id}`} onClick={() => onOpenSpace?.(org.id, dm.id)}>
+                <MemberAvatar id={otherParticipant(dm, org.memberId) ?? dm.id} name={spaceDisplayName(org, dm)} size="sm" className="mr-2 size-3.5 rounded-[3px] text-[7px]" />
+                <span className="truncate">{spaceDisplayName(org, dm)}</span>
                 {orgs.length > 1 && <span className="ml-2 truncate text-xs text-muted-foreground">{org.name}</span>}
               </ContextMenuItem>
             )))}
@@ -1725,6 +1735,7 @@ function FlyoutOrgRows({ org, activeSpace, unread, onOpenSpace, onChanged }: {
 }) {
   const [creating, setCreating] = useState(false)
   const [newName, setNewName] = useState('')
+  const [newDirectOpen, setNewDirectOpen] = useState(false)
   // A dead OAuth session shows as a gentle "Sign in again" (org.authError, from core);
   // an unreachable org shows Retry.
   const needsSignIn = !!org.authError
@@ -1755,6 +1766,14 @@ function FlyoutOrgRows({ org, activeSpace, unread, onOpenSpace, onChanged }: {
       toast(err instanceof Error ? err.message : 'Could not create the space', 'error')
     }
   }
+
+  // DMs: people, most recent conversation first (their streams are warmed so
+  // unread and recency read the loaded tail — a DM has no discussions to badge from).
+  useEffect(() => {
+    for (const dm of org.directs) prefetchStream(org.id, dm.id)
+  }, [org.id, org.directs])
+  const directs = [...org.directs].sort((a, b) =>
+    (spaceLastActivityAt(org.id, b.id) ?? b.createdAt).localeCompare(spaceLastActivityAt(org.id, a.id) ?? a.createdAt))
 
   return (
     <>
@@ -1794,6 +1813,9 @@ function FlyoutOrgRows({ org, activeSpace, unread, onOpenSpace, onChanged }: {
           <DropdownMenuContent side="right" align="start">
             <DropdownMenuItem onClick={() => setCreating(true)}>
               <Plus className="mr-2 size-3.5" /> New space
+            </DropdownMenuItem>
+            <DropdownMenuItem onClick={() => setNewDirectOpen(true)}>
+              <MessagesSquare className="mr-2 size-3.5" /> New message
             </DropdownMenuItem>
             <DropdownMenuSeparator />
             <DropdownMenuItem
@@ -1837,6 +1859,46 @@ function FlyoutOrgRows({ org, activeSpace, unread, onOpenSpace, onChanged }: {
           <span className="flex-1 truncate">Create the first space</span>
         </button>
       )}
+      {/* Direct messages — a DM is a space with a two-person roster; the row is the person. */}
+      {!org.error && (
+        <div className="flex h-6 items-end pl-5 pr-2.5 text-[10.5px] font-medium uppercase tracking-wide text-muted-foreground/70">
+          <span className="truncate">Direct messages</span>
+        </div>
+      )}
+      {!org.error && directs.map((dm) => {
+        const active = activeSpace?.orgId === org.id && activeSpace.spaceId === dm.id
+        const count = unread.get(`${org.id}/${dm.id}`) ?? 0
+        const label = spaceDisplayName(org, dm)
+        return (
+          <button
+            key={dm.id}
+            type="button"
+            onClick={() => onOpenSpace(org.id, dm.id)}
+            onMouseEnter={() => prefetchStream(org.id, dm.id)}
+            className={cn(
+              'flex w-full items-center gap-2.5 rounded-[9px] py-2 pl-5 pr-2.5 text-left text-[13.5px] text-foreground/90 hover:bg-accent',
+              active && 'bg-[var(--sidebar-accent)]',
+            )}
+          >
+            <MemberAvatar id={otherParticipant(dm, org.memberId) ?? dm.id} name={label} size="sm" className="size-4 rounded-[3px] text-[8px]" />
+            <span className={cn('min-w-0 flex-1 truncate', count > 0 && !active && 'font-medium text-foreground')}>{label}</span>
+            {count > 0 && (
+              <span className="shrink-0 text-[11px] font-semibold tabular-nums text-foreground/80">{count}</span>
+            )}
+          </button>
+        )
+      })}
+      {!org.error && (
+        <button
+          type="button"
+          onClick={() => setNewDirectOpen(true)}
+          className="flex w-full items-center gap-2 rounded-[9px] py-2 pl-5 pr-2.5 text-left text-xs text-muted-foreground hover:bg-accent"
+        >
+          <Plus className="size-3.5 shrink-0" />
+          <span className="flex-1 truncate">New message</span>
+        </button>
+      )}
+      <NewDirectDialog org={org} open={newDirectOpen} onOpenChange={setNewDirectOpen} onOpened={onOpenSpace} />
       {creating && (
         <div className="flex items-center gap-1 py-0.5 pl-5 pr-2">
           <Input

@@ -1,4 +1,4 @@
-import { useEffect, useSyncExternalStore } from 'react'
+import { useEffect, useMemo, useSyncExternalStore } from 'react'
 import type { spaces } from '@x/shared'
 
 // The space roster, module-level and persisted per install (localStorage),
@@ -113,22 +113,46 @@ export function refreshMembers(orgId: string, spaceId: string): void {
     void loadMembers(orgId, spaceId)
 }
 
+function subscribeMembers(l: () => void): () => void {
+    listeners.add(l)
+    return () => {
+        listeners.delete(l)
+    }
+}
+
 /** The space's roster: cached names in the first frame, refreshed behind. */
 export function useSpaceMembers(orgId: string, spaceId: string): spaces.Member[] {
     // Before the snapshot read, not in an effect: a revisited space must
     // resolve names in its FIRST frame, beside the stream's cached tail.
     hydrateMembers(key(orgId, spaceId))
-    const state = useSyncExternalStore(
-        (l) => {
-            listeners.add(l)
-            return () => {
-                listeners.delete(l)
-            }
-        },
-        () => memberState,
-    )
+    const state = useSyncExternalStore(subscribeMembers, () => memberState)
     useEffect(() => {
         void loadMembers(orgId, spaceId)
     }, [orgId, spaceId])
     return state.get(key(orgId, spaceId)) ?? EMPTY_MEMBERS
+}
+
+/**
+ * Everyone your person shares a space with on this org, A–Z — the people a
+ * DM can be opened with. There is no org roster route yet; the rosters the
+ * app already fetches ARE the directory (Discord's "people you share a
+ * server with" rule, by construction rather than policy).
+ */
+export function useOrgRoster(orgId: string, spaceIds: readonly string[]): spaces.Member[] {
+    const idsKey = spaceIds.join('|')
+    for (const id of spaceIds) hydrateMembers(key(orgId, id))
+    const state = useSyncExternalStore(subscribeMembers, () => memberState)
+    useEffect(() => {
+        for (const id of spaceIds) void loadMembers(orgId, id)
+        // The joined key IS the dependency — the array identity changes every render.
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [orgId, idsKey])
+    return useMemo(() => {
+        const byId = new Map<string, spaces.Member>()
+        for (const id of spaceIds) {
+            for (const m of state.get(key(orgId, id)) ?? []) if (!byId.has(m.id)) byId.set(m.id, m)
+        }
+        return [...byId.values()].sort((a, b) => a.displayName.localeCompare(b.displayName))
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [state, orgId, idsKey])
 }

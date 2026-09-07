@@ -41,7 +41,8 @@ import { BgTasksView } from '@/components/bg-tasks-view';
 import { AppsView } from '@/components/apps/apps-view';
 import { SpacesView, type SpaceSelection } from '@/components/spaces-view';
 import { railKey, type RailSelection } from '@/lib/spaces-selection';
-import { useSpacesOrgs } from '@/hooks/use-spaces';
+import { findSpace, useSpacesOrgs } from '@/hooks/use-spaces';
+import { spaceDisplayName } from '@/lib/spaces-direct';
 import { EmailView } from '@/components/email-view';
 import { WorkspaceView } from '@/components/workspace-view';
 import { KnowledgeView, type KnowledgeViewMode } from '@/components/knowledge-view';
@@ -4641,7 +4642,8 @@ function App() {
       case 'apps': return 'Apps'
       case 'spaces': {
         const org = spacesOrgs.find((o) => o.id === currentViewState.orgId)
-        return org?.spaces.find((sp) => sp.id === currentViewState.spaceId)?.name ?? 'Spaces'
+        const space = org ? findSpace(org, currentViewState.spaceId) : undefined
+        return org && space ? spaceDisplayName(org, space) : 'Spaces'
       }
       case 'workspace': return 'Workspace'
       case 'knowledge-view': return 'Brain'
