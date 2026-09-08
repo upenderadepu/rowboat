@@ -682,7 +682,13 @@ export function GeneralStream({
                     <div className="flex items-center gap-2 px-2 py-3 text-sm text-muted-foreground"><Loader2 className="size-3.5 animate-spin" /> Loading messages…</div>
                 )}
                 {stream.ready && rows.length === 0 && (
-                    <div className="px-2 py-6 text-sm text-muted-foreground">Nothing here yet — say hello, or @rowboat to ask your agent.</div>
+                    <div className="px-2 py-6 text-sm text-muted-foreground">
+                        {space.kind === 'direct' && (space.participants ?? []).length === 1
+                            ? 'Your notes to self — drafts, links, files for later. Only you can see this, and @rowboat works here too.'
+                            : space.kind === 'direct'
+                                ? 'Private to the two of you — say hello, or @rowboat to ask your agent.'
+                                : 'Nothing here yet — say hello, or @rowboat to ask your agent.'}
+                    </div>
                 )}
                 {rows}
                 <TypingIndicator names={typingNames} />
