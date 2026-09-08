@@ -60,13 +60,16 @@ export function refreshSpacesOrgs(): Promise<void> {
                         // roster is the lookup (no org roster route exists).
                         const directLabels: Record<string, string> = {}
                         await Promise.all(directs.map(async (dm) => {
-                            const other = (dm.participants ?? []).find((id) => id !== org.memberId)
-                            if (!other) return
+                            // One participant = your self-DM; its roster is you.
+                            const self = (dm.participants ?? []).length === 1 && dm.participants![0] === org.memberId
+                            const who = self ? org.memberId : (dm.participants ?? []).find((id) => id !== org.memberId)
+                            if (!who) return
                             try {
                                 const { members } = await window.ipc.invoke('spaces:listMembers', { orgId: org.id, spaceId: dm.id })
-                                directLabels[dm.id] = members.find((m) => m.id === other)?.displayName ?? other
+                                const name = members.find((m) => m.id === who)?.displayName ?? who
+                                directLabels[dm.id] = self ? `${name} (you)` : name
                             } catch {
-                                directLabels[dm.id] = previous?.directLabels[dm.id] ?? other
+                                directLabels[dm.id] = previous?.directLabels[dm.id] ?? (self ? 'You' : who)
                             }
                         }))
                         return { ...org, spaces: shared, directs, directLabels }
@@ -96,6 +99,17 @@ export function subscribeOrgs(listener: () => void): () => void {
     return () => {
         orgsListeners.delete(listener)
     }
+}
+
+/**
+ * Open (creating on first use) your notes-to-self DM on an org and return its
+ * space id. The sidebar shows the "You" row before the space exists — the org
+ * makes it the first time you click.
+ */
+export async function openSelfDirect(orgId: string, memberId: string): Promise<string> {
+    const { space } = await window.ipc.invoke('spaces:openDirect', { orgId, memberId })
+    await refreshSpacesOrgs()
+    return space.id
 }
 
 /** Non-React read of the orgs store. */

@@ -70,11 +70,12 @@ import { SettingsDialog } from "@/components/settings-dialog"
 import { SidebarCreditRewards } from "@/components/sidebar-credit-rewards"
 import { SPACES_ENABLED } from "@/lib/feature-flags"
 import { AddOrgDialog, OrgMonogram, type SpaceSelection } from "@/components/spaces-view"
-import { useSpacesOrgs, type OrgWithSpaces } from "@/hooks/use-spaces"
+import { openSelfDirect, useSpacesOrgs, type OrgWithSpaces } from "@/hooks/use-spaces"
 import { prefetchStream, spaceLastActivityAt, useSpacesUnreadCounts } from "@/hooks/use-space-chat"
 import { MemberAvatar } from "@/components/spaces/atoms"
 import { NewDirectDialog } from "@/components/spaces/new-direct-dialog"
-import { otherParticipant, spaceDisplayName } from "@/lib/spaces-direct"
+import { directAvatarId, isSelfDirect, isSelfDirectUnsupported, markSelfDirectUnsupported, selfDirectFailureMessage, selfDirectRefused, spaceDisplayName } from "@/lib/spaces-direct"
+import { useSelfDisplayName } from "@/hooks/use-space-members"
 import { MascotFaceIcon } from "@/components/talking-head"
 import { extractConferenceLink } from "@/lib/calendar-event"
 import { useBilling } from "@/hooks/useBilling"
@@ -1247,7 +1248,7 @@ export function DockSidebar({
             )))}
             {orgs.flatMap((org) => org.directs.map((dm) => (
               <ContextMenuItem key={`${org.id}/${dm.id}`} onClick={() => onOpenSpace?.(org.id, dm.id)}>
-                <MemberAvatar id={otherParticipant(dm, org.memberId) ?? dm.id} name={spaceDisplayName(org, dm)} size="sm" className="mr-2 size-3.5 rounded-[3px] text-[7px]" />
+                <MemberAvatar id={directAvatarId(dm, org.memberId)} name={spaceDisplayName(org, dm)} size="sm" className="mr-2 size-3.5 rounded-[3px] text-[7px]" />
                 <span className="truncate">{spaceDisplayName(org, dm)}</span>
                 {orgs.length > 1 && <span className="ml-2 truncate text-xs text-muted-foreground">{org.name}</span>}
               </ContextMenuItem>
@@ -1819,8 +1820,30 @@ function FlyoutOrgRows({ org, activeSpace, unread, onOpenSpace, onChanged, onReq
   useEffect(() => {
     for (const dm of org.directs) prefetchStream(org.id, dm.id)
   }, [org.id, org.directs])
+  // Your notes-to-self DM sits in the list like anyone else's ("<name>  you",
+  // Slack's posture) and shows before it exists (the org creates it on first click).
+  const selfDm = org.directs.find((dm) => isSelfDirect(dm, org.memberId))
   const directs = [...org.directs].sort((a, b) =>
     (spaceLastActivityAt(org.id, b.id) ?? b.createdAt).localeCompare(spaceLastActivityAt(org.id, a.id) ?? a.createdAt))
+  const selfRosterIds = useMemo(
+    () => (selfDm ? [selfDm.id] : org.spaces.slice(0, 1).map((s) => s.id)),
+    [selfDm, org.spaces],
+  )
+  const selfName = useSelfDisplayName(org.id, org.memberId, selfRosterIds)
+    ?? (selfDm ? spaceDisplayName(org, selfDm).replace(/ \(you\)$/, '') : org.memberId)
+  const [selfUnsupported, setSelfUnsupported] = useState(() => isSelfDirectUnsupported(org.id))
+  const openSelf = async () => {
+    if (selfDm) return onOpenSpace(org.id, selfDm.id)
+    try {
+      onOpenSpace(org.id, await openSelfDirect(org.id, org.memberId))
+    } catch (err) {
+      if (selfDirectRefused(err)) {
+        markSelfDirectUnsupported(org.id)
+        setSelfUnsupported(true)
+      }
+      toast(selfDirectFailureMessage(org.name, err), 'error')
+    }
+  }
 
   return (
     <>
@@ -1946,7 +1969,8 @@ function FlyoutOrgRows({ org, activeSpace, unread, onOpenSpace, onChanged, onReq
       {!org.error && directs.map((dm) => {
         const active = activeSpace?.orgId === org.id && activeSpace.spaceId === dm.id
         const count = unread.get(`${org.id}/${dm.id}`) ?? 0
-        const label = spaceDisplayName(org, dm)
+        const self = isSelfDirect(dm, org.memberId)
+        const label = self ? selfName : spaceDisplayName(org, dm)
         return (
           <button
             key={dm.id}
@@ -1958,14 +1982,33 @@ function FlyoutOrgRows({ org, activeSpace, unread, onOpenSpace, onChanged, onReq
               active && 'bg-[var(--sidebar-accent)]',
             )}
           >
-            <MemberAvatar id={otherParticipant(dm, org.memberId) ?? dm.id} name={label} size="sm" className="size-4 rounded-[3px] text-[8px]" />
-            <span className={cn('min-w-0 flex-1 truncate', count > 0 && !active && 'font-medium text-foreground')}>{label}</span>
+            <MemberAvatar id={directAvatarId(dm, org.memberId)} name={label} size="sm" className="size-4 rounded-[3px] text-[8px]" />
+            <span className={cn('min-w-0 flex-1 truncate', count > 0 && !active && 'font-medium text-foreground')}>
+              {label}
+              {self && <span className="ml-1.5 font-normal text-muted-foreground">you</span>}
+            </span>
             {count > 0 && (
               <span className="shrink-0 text-[11px] font-semibold tabular-nums text-foreground/80">{count}</span>
             )}
           </button>
         )
       })}
+      {!org.error && !selfDm && (
+        <button
+          type="button"
+          onClick={() => void openSelf()}
+          title={selfUnsupported
+            ? `Notes to self need a newer server — ${org.name} hasn't been updated yet`
+            : 'Notes to self — only you (and your agent) can see this'}
+          className={cn(
+            'flex w-full items-center gap-2.5 rounded-[9px] py-2 pl-5 pr-2.5 text-left text-[13.5px] text-foreground/90 hover:bg-accent',
+            selfUnsupported && 'opacity-50',
+          )}
+        >
+          <MemberAvatar id={org.memberId} name={selfName} size="sm" className="size-4 rounded-[3px] text-[8px]" />
+          <span className="min-w-0 flex-1 truncate">{selfName}<span className="ml-1.5 font-normal text-muted-foreground">you</span></span>
+        </button>
+      )}
       {!org.error && (
         <button
           type="button"

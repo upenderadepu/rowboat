@@ -201,7 +201,11 @@ team and a Roadboard space (`src/main.ts`).
   `openDirect` is get-or-create and idempotent from either side — concurrent
   opens converge on one space (`created` says who made it). No invite, no
   acceptance: the org is the trust boundary, as inside one Slack workspace;
-  self-DM (`invalid_request`) and unknown members (`not_found`) refuse. **A
+  unknown members refuse (`not_found`). **Your own id opens your self-DM**
+  (2026-09-08): one participant, one membership, one `joined` event, no
+  `space_added` (nobody to tell) — notes to self that live on the org, seen
+  by every device and by your agent through the same face; the agent face
+  flags it `self: true`. **A
   direct space is private forever** — any future path that opens spaces to
   non-members (browse, self-join) MUST require `kind === 'shared'`. Its stored
   `name` is a constant placeholder; clients label a DM by the other
