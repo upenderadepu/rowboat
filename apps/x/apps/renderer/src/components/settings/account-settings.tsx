@@ -16,10 +16,40 @@ import {
 } from "@/components/ui/alert-dialog"
 import { Separator } from "@/components/ui/separator"
 import { useBilling } from "@/hooks/useBilling"
+import { useRowboatConfig } from "@/hooks/use-rowboat-config"
+import { CreditRewards } from "@/components/settings/credit-rewards"
 import { toast } from "sonner"
+import { getBillingPlanData, type BillingUsageBucket } from "@x/shared/dist/billing.js"
 
 interface AccountSettingsProps {
   dialogOpen: boolean
+}
+
+function CreditUsageBar({ label, bucket, helper }: {
+  label: string
+  bucket: BillingUsageBucket
+  helper?: string
+}) {
+  const pct = bucket.sanctionedCredits > 0
+    ? Math.min(100, Math.max(0, Math.round((bucket.usedCredits / bucket.sanctionedCredits) * 100)))
+    : 0
+
+  return (
+    <div className="space-y-1.5">
+      <div className="flex items-start justify-between gap-3">
+        <div>
+          <p className="text-xs font-medium text-muted-foreground">{label}</p>
+          {helper ? <p className="text-[11px] text-muted-foreground">{helper}</p> : null}
+        </div>
+        <p className="shrink-0 text-xs font-medium tabular-nums">
+          {pct}%
+        </p>
+      </div>
+      <div className="h-2 overflow-hidden rounded-full bg-muted">
+        <div className="h-full rounded-full bg-primary transition-all" style={{ width: `${pct}%` }} />
+      </div>
+    </div>
+  )
 }
 
 export function AccountSettings({ dialogOpen }: AccountSettingsProps) {
@@ -27,9 +57,10 @@ export function AccountSettings({ dialogOpen }: AccountSettingsProps) {
   const [connectionLoading, setConnectionLoading] = useState(true)
   const [disconnecting, setDisconnecting] = useState(false)
   const [connecting, setConnecting] = useState(false)
-  const [appUrl, setAppUrl] = useState<string | null>(null)
-  const { billing, isLoading: billingLoading } = useBilling(isRowboatConnected)
-  const hasPaidSubscription = billing?.subscriptionPlan === 'starter' || billing?.subscriptionPlan === 'pro'
+  const appUrl = useRowboatConfig()?.appUrl ?? null
+  const { billing, isLoading: billingLoading, refresh: refreshBilling } = useBilling(isRowboatConnected)
+  const currentPlan = billing ? getBillingPlanData(billing.catalog, billing.subscriptionPlanId) : null
+  const hasPaidSubscription = currentPlan?.category === 'starter' || currentPlan?.category === 'pro'
 
   const checkConnection = useCallback(async () => {
     try {
@@ -51,14 +82,6 @@ export function AccountSettings({ dialogOpen }: AccountSettingsProps) {
   }, [dialogOpen, checkConnection])
 
   useEffect(() => {
-    if (isRowboatConnected) {
-      window.ipc.invoke('account:getRowboat', null)
-        .then((account) => setAppUrl(account.config?.appUrl ?? null))
-        .catch(() => {})
-    }
-  }, [isRowboatConnected])
-
-  useEffect(() => {
     const cleanup = window.ipc.on('oauth:didConnect', (event) => {
       if (event.provider === 'rowboat') {
         setIsRowboatConnected(event.success)
@@ -70,6 +93,14 @@ export function AccountSettings({ dialogOpen }: AccountSettingsProps) {
     })
     return cleanup
   }, [])
+
+  // A confirmed reward grant changes the bonus-credit balance; refetch so the
+  // Earn-credits section shows the updated number while the dialog is open.
+  useEffect(() => {
+    return window.ipc.on('credits:didActivate', () => {
+      refreshBilling()
+    })
+  }, [refreshBilling])
 
   const handleConnect = useCallback(async () => {
     try {
@@ -164,7 +195,7 @@ export function AccountSettings({ dialogOpen }: AccountSettingsProps) {
             <div className="flex items-center justify-between">
               <div>
                 <p className="text-sm font-medium capitalize">
-                  {billing.subscriptionPlan ? `${billing.subscriptionPlan} Plan` : 'No Plan'}
+                  {currentPlan?.displayName ?? (billing.subscriptionPlanId ? 'Unknown' : 'No plan')}
                 </p>
                 {billing.subscriptionStatus === 'trialing' && billing.trialExpiresAt ? (() => {
                   const days = Math.max(0, Math.ceil((new Date(billing.trialExpiresAt).getTime() - Date.now()) / (1000 * 60 * 60 * 24)))
@@ -176,22 +207,32 @@ export function AccountSettings({ dialogOpen }: AccountSettingsProps) {
                 })() : billing.subscriptionStatus ? (
                   <p className="text-xs text-muted-foreground capitalize">{billing.subscriptionStatus}</p>
                 ) : null}
-                {!billing.subscriptionPlan && (
+                {!billing.subscriptionPlanId && (
                   <p className="text-xs text-muted-foreground">Subscribe to access AI features</p>
-                )}
-                {billing.subscriptionPlan === 'free' && (
-                  <p className="text-xs text-muted-foreground">Free usage resets daily at 00:00 UTC.</p>
                 )}
               </div>
               <Button variant="outline" size="sm" onClick={() => appUrl && window.open(`${appUrl}?intent=upgrade`)}>
-                {!billing.subscriptionPlan ? 'Subscribe' : billing.subscriptionPlan === 'free' ? 'Upgrade' : 'Change plan'}
+                {!billing.subscriptionPlanId ? 'Subscribe' : currentPlan?.category === 'free' ? 'Upgrade' : 'Change plan'}
               </Button>
+            </div>
+            <div className="space-y-3 border-t pt-3">
+              <CreditUsageBar label="Plan usage" bucket={billing.monthly} />
+              <CreditUsageBar
+                label="Daily use"
+                bucket={billing.daily}
+                helper="Daily usage resets at 00:00 UTC"
+              />
             </div>
           </div>
         ) : (
           <p className="text-xs text-muted-foreground">Unable to load plan details</p>
         )}
       </div>
+
+      <Separator />
+
+      {/* Earn Credits Section */}
+      <CreditRewards store={billing?.store ?? null} />
 
       <Separator />
 

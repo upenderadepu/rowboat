@@ -2,9 +2,13 @@ import { StrictMode } from 'react'
 import { createRoot } from 'react-dom/client'
 import './index.css'
 import App from './App.tsx'
-import posthog from 'posthog-js'
 import { PostHogProvider } from 'posthog-js/react'
+import type { CaptureResult } from 'posthog-js'
 import { ThemeProvider } from '@/contexts/theme-context'
+import { configureAnalyticsContext } from './lib/analytics'
+import { MeetingDetectedPopup } from '@/components/meeting-detected-popup'
+import { QuickAskBar } from '@/components/quick-ask-bar'
+import { ScreenPointerOverlay } from '@/components/screen-pointer-overlay'
 
 // Fetch the stable installation ID from main so renderer + main share one
 // PostHog distinct_id. Falls back to PostHog's auto-generated anonymous ID
@@ -12,19 +16,36 @@ import { ThemeProvider } from '@/contexts/theme-context'
 async function bootstrap() {
   let installationId: string | undefined
   let apiUrl: string | undefined
+  let appVersion: string | undefined
   try {
     const result = await window.ipc.invoke('analytics:bootstrap', null)
     installationId = result.installationId
     apiUrl = result.apiUrl
+    appVersion = result.appVersion
   } catch (err) {
     console.error('[Analytics] Failed to bootstrap from main:', err)
   }
 
+  configureAnalyticsContext({ apiUrl, appVersion })
+
   const options = {
     api_host: import.meta.env.VITE_PUBLIC_POSTHOG_HOST,
-    defaults: '2025-11-30',
+    defaults: '2025-11-30' as const,
     ...(installationId ? { bootstrap: { distinctID: installationId } } : {}),
-  } as const
+    before_send: (event: CaptureResult | null) => {
+      if (!event) return event
+      if (appVersion) {
+        event.properties = {
+          ...event.properties,
+          app_version: appVersion,
+        }
+      }
+      return event
+    },
+    loaded: () => {
+      configureAnalyticsContext({ apiUrl, appVersion })
+    },
+  }
 
   createRoot(document.getElementById('root')!).render(
     <StrictMode>
@@ -36,11 +57,32 @@ async function bootstrap() {
     </StrictMode>,
   )
 
-  // Tag the active person record with api_url so anonymous users are also
-  // segmentable by environment.
-  if (apiUrl) {
-    posthog.people.set({ api_url: apiUrl })
-  }
+  // The loaded callback applies api_url/app_version once PostHog has initialized.
 }
 
-bootstrap()
+// Utility windows load the same bundle with a hash route and render only
+// their own UI — no analytics or app bootstrap needed.
+if (window.location.hash === '#meeting-detected') {
+  // "Meeting detected — Take Notes?" popup window; same pattern.
+  createRoot(document.getElementById('root')!).render(
+    <StrictMode>
+      <MeetingDetectedPopup />
+    </StrictMode>,
+  )
+} else if (window.location.hash === '#quick-ask') {
+  // The hover companion (global ⌥⇧Space); same pattern.
+  createRoot(document.getElementById('root')!).render(
+    <StrictMode>
+      <QuickAskBar />
+    </StrictMode>,
+  )
+} else if (window.location.hash === '#screen-pointer') {
+  // Assistant's pointer over the shared screen; same pattern.
+  createRoot(document.getElementById('root')!).render(
+    <StrictMode>
+      <ScreenPointerOverlay />
+    </StrictMode>,
+  )
+} else {
+  bootstrap()
+}

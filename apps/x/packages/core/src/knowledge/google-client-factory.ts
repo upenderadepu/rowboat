@@ -1,4 +1,12 @@
 import { OAuth2Client } from 'google-auth-library';
+import { google, gmail_v1 } from 'googleapis';
+import {
+    IN_REQUEST_RETRY_FALLBACK_MS,
+    gmailCooldownInfo,
+    inRequestRetryWaitMs,
+    isRateLimitError,
+    noteGmailRateLimit,
+} from './gmail-rate-limit.js';
 import container from '../di/container.js';
 import { IOAuthRepo } from '../auth/repo.js';
 import { IClientRegistrationRepo } from '../auth/client-repo.js';
@@ -8,6 +16,7 @@ import type { Configuration } from '../auth/oauth-client.js';
 import { OAuthTokens } from '../auth/types.js';
 import {
     ReconnectRequiredError,
+    TransientRefreshError,
     refreshTokensViaBackend,
 } from '../auth/google-backend-oauth.js';
 
@@ -52,11 +61,14 @@ export class GoogleClientFactory {
     };
 
     /**
-     * Promise singleton so a burst of getClient() calls during the brief
-     * expiry window all wait on a single refresh round-trip rather than
-     * fanning out parallel refreshes.
+     * Promise singleton so concurrent getClient() callers share a single
+     * pass through the read/refresh/build pipeline rather than fanning
+     * out parallel refreshes. The check-and-assign must be atomic (no
+     * `await` between them) so two callers in the same tick can't both
+     * pass the null check before either assigns — that's why getClient()
+     * is a thin synchronous wrapper around getClientInner().
      */
-    private static refreshInFlight: Promise<OAuth2Client | null> | null = null;
+    private static inFlightClient: Promise<OAuth2Client | null> | null = null;
 
     private static async resolveByokCredentials(): Promise<{ clientId: string; clientSecret?: string }> {
         const oauthRepo = container.resolve<IOAuthRepo>('oauthRepo');
@@ -69,13 +81,24 @@ export class GoogleClientFactory {
     }
 
     /**
-     * Get or create OAuth2Client, reusing cached instance when possible
+     * Get or create OAuth2Client, reusing the cached instance when possible.
+     *
+     * The check-and-assign of `inFlightClient` is synchronous so concurrent
+     * callers in the same tick coalesce onto a single pipeline run. The actual
+     * work lives in getClientInner(); this wrapper exists purely to guarantee
+     * the dedup invariant.
      */
     static async getClient(): Promise<OAuth2Client | null> {
-        if (this.refreshInFlight) {
-            return this.refreshInFlight;
+        if (this.inFlightClient) {
+            return this.inFlightClient;
         }
+        this.inFlightClient = this.getClientInner().finally(() => {
+            this.inFlightClient = null;
+        });
+        return this.inFlightClient;
+    }
 
+    private static async getClientInner(): Promise<OAuth2Client | null> {
         const oauthRepo = container.resolve<IOAuthRepo>('oauthRepo');
         const connection = await oauthRepo.read(this.PROVIDER_NAME);
         const tokens = connection.tokens ?? null;
@@ -110,16 +133,12 @@ export class GoogleClientFactory {
         // expiry — keeps long-running calls from racing the boundary.
         if (oauthClient.isTokenExpired(tokens)) {
             if (!tokens.refresh_token) {
-                console.log('[OAuth] Token expired and no refresh token available for Google.');
+                console.log('[OAuth] Google token expired and no refresh token available.');
                 await oauthRepo.upsert(this.PROVIDER_NAME, { error: 'Missing refresh token. Please reconnect.' });
                 this.clearCache();
                 return null;
             }
-
-            this.refreshInFlight = this.refreshAndBuild(tokens, mode).finally(() => {
-                this.refreshInFlight = null;
-            });
-            return this.refreshInFlight;
+            return this.refreshAndBuild(tokens, mode);
         }
 
         // Reuse client if tokens haven't changed
@@ -135,7 +154,8 @@ export class GoogleClientFactory {
         const oauthRepo = container.resolve<IOAuthRepo>('oauthRepo');
 
         try {
-            console.log(`[OAuth] Token expired, refreshing via ${mode}...`);
+            const secsSinceExpiry = Math.floor(Date.now() / 1000) - tokens.expires_at;
+            console.log(`[OAuth] Google token expired ${secsSinceExpiry}s ago, refreshing via ${mode}...`);
             const existingScopes = tokens.scopes;
 
             let refreshedTokens: OAuthTokens;
@@ -150,7 +170,8 @@ export class GoogleClientFactory {
             }
 
             await oauthRepo.upsert(this.PROVIDER_NAME, { tokens: refreshedTokens, error: null });
-            console.log('[OAuth] Token refreshed successfully');
+            const ttl = refreshedTokens.expires_at - Math.floor(Date.now() / 1000);
+            console.log(`[OAuth] Google token refreshed successfully (mode=${mode}, new expires_at=${refreshedTokens.expires_at}, ttl=${ttl}s)`);
             return this.buildAndCacheClient(refreshedTokens, mode);
         } catch (error) {
             if (error instanceof ReconnectRequiredError) {
@@ -159,9 +180,24 @@ export class GoogleClientFactory {
                 this.clearCache();
                 return null;
             }
+            if (error instanceof TransientRefreshError) {
+                // Transient (rate limit, in-flight dedup, upstream 5xx): leave
+                // stored tokens + cache alone, log, and let the next sync tick
+                // retry. Writing an `error` here would stick "Needs reconnect"
+                // in the UI for a problem the user can't fix by reconnecting.
+                console.warn(`[OAuth] Transient Google refresh failure (status=${error.status}): ${error.message} — will retry on next tick`);
+                return null;
+            }
             const message = error instanceof Error ? error.message : 'Failed to refresh token for Google';
             await oauthRepo.upsert(this.PROVIDER_NAME, { error: message });
             console.error('[OAuth] Failed to refresh token for Google:', error);
+            // Walk cause chain so we can see e.g. `Not signed into Rowboat`
+            // showing up under a generic `fetch failed` outer error.
+            let cause: unknown = error;
+            while (cause != null && typeof cause === 'object' && 'cause' in cause) {
+                cause = (cause as { cause?: unknown }).cause;
+                if (cause != null) console.error('[OAuth] Caused by:', cause);
+            }
             this.clearCache();
             return null;
         }
@@ -188,18 +224,41 @@ export class GoogleClientFactory {
      * Check if credentials are available and have required scopes
      */
     static async hasValidCredentials(requiredScopes: string | string[]): Promise<boolean> {
+        const status = await this.getCredentialStatus(requiredScopes);
+        return status.hasRequiredScopes;
+    }
+
+    static async getCredentialStatus(requiredScopes: string | string[]): Promise<{
+        connected: boolean;
+        hasRequiredScopes: boolean;
+        missingScopes: string[];
+    }> {
         const oauthRepo = container.resolve<IOAuthRepo>('oauthRepo');
         const { tokens } = await oauthRepo.read(this.PROVIDER_NAME);
         if (!tokens) {
-            return false;
+            const scopesArray = Array.isArray(requiredScopes) ? requiredScopes : [requiredScopes];
+            return {
+                connected: false,
+                hasRequiredScopes: false,
+                missingScopes: scopesArray,
+            };
         }
 
-        // Check if required scope(s) are present
         const scopesArray = Array.isArray(requiredScopes) ? requiredScopes : [requiredScopes];
+        const granted = new Set(tokens.scopes ?? []);
+        const missingScopes = scopesArray.filter(scope => !granted.has(scope));
         if (!tokens.scopes || tokens.scopes.length === 0) {
-            return false;
+            return {
+                connected: true,
+                hasRequiredScopes: false,
+                missingScopes,
+            };
         }
-        return scopesArray.every(scope => tokens.scopes!.includes(scope));
+        return {
+            connected: true,
+            hasRequiredScopes: missingScopes.length === 0,
+            missingScopes,
+        };
     }
 
     /**
@@ -275,6 +334,44 @@ export class GoogleClientFactory {
         this.cache.clientId = clientId;
         this.cache.clientSecret = clientSecret ?? null;
         console.log('[OAuth] Google OAuth configuration initialized');
+    }
+
+    /**
+     * Gmail API client with rate-limit retry — parity with Outlook's
+     * graphFetch (outlook-client-factory.ts): one retry per request on a
+     * throttled response, waiting out the deadline Gmail names (Retry-After
+     * header or the "Retry after <timestamp>" in the error message) when it
+     * fits under the in-request cap. gaxios' stock retry can't express this —
+     * its delay formula never reads Retry-After, and its default method list
+     * excludes POST, which modify/trash/send all use — so both hooks are
+     * custom.
+     *
+     * A request that will fail anyway — retry spent, or the deadline outlasts
+     * the cap — arms the cross-cycle cooldown (gmail-rate-limit.ts) on its way
+     * out, so the background sync loops stop re-tripping the quota every tick.
+     */
+    static gmailClient(auth: OAuth2Client): gmail_v1.Gmail {
+        return google.gmail({
+            version: 'v1',
+            auth,
+            retryConfig: {
+                retry: 1,
+                shouldRetry: (err) => {
+                    if (!isRateLimitError(err)) return false;
+                    const attempt = err.config.retryConfig?.currentRetryAttempt ?? 0;
+                    if (attempt < 1 && inRequestRetryWaitMs(err) !== null) return true;
+                    const until = noteGmailRateLimit(err);
+                    const source = gmailCooldownInfo()?.source === 'gmail' ? "Gmail's stated deadline" : 'default backoff';
+                    console.warn(`[Gmail] rate limited — cooling down until ${new Date(until).toISOString()} (${source})`);
+                    return false;
+                },
+                retryBackoff: (err) => {
+                    const waitMs = inRequestRetryWaitMs(err) ?? IN_REQUEST_RETRY_FALLBACK_MS;
+                    console.warn(`[Gmail] rate limited — retrying after ${waitMs}ms`);
+                    return new Promise((resolve) => setTimeout(resolve, waitMs));
+                },
+            },
+        });
     }
 
     /** BYOK OAuth2Client — has client_id + secret + refresh_token. */

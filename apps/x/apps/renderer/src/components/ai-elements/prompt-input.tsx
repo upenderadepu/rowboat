@@ -48,7 +48,7 @@ import {
 } from "lucide-react";
 import { nanoid } from "nanoid";
 import { useMentionDetection } from "@/hooks/use-mention-detection";
-import { MentionPopover } from "@/components/mention-popover";
+import { MentionPopover, ROWBOAT_MENTION_SENTINEL } from "@/components/mention-popover";
 import { toKnowledgePath, wikiLabel } from "@/lib/wiki-links";
 import { getMentionHighlightSegments } from "@/lib/mention-highlights";
 import {
@@ -967,6 +967,14 @@ export const PromptInputTextarea = ({
     knowledgeFiles.length > 0
   );
 
+  // Escape-dismissal: `open` derives from the text, so closing needs real
+  // state. Dismissed stays true for the current mention; a fresh "@" (or
+  // ending the mention) re-arms the popover.
+  const [mentionDismissed, setMentionDismissed] = useState(false);
+  useEffect(() => {
+    if (!activeMention) setMentionDismissed(false);
+  }, [activeMention?.triggerIndex, activeMention]);
+
   // Use proper regex-based highlight segmentation that handles multi-word names
   const mentionHighlights = useMemo(
     () => getMentionHighlightSegments(currentValue, activeMention, mentionLabels),
@@ -1001,10 +1009,13 @@ export const PromptInputTextarea = ({
       const newText = `${beforeAt}@${displayName} ${afterQuery}`;
       controller.textInput.setInput(newText);
 
-      // Convert to knowledge path and add mention
-      const fullPath = toKnowledgePath(path);
-      if (fullPath && mentionsCtx) {
-        mentionsCtx.addMention(fullPath, displayName);
+      // Convert to knowledge path and add mention. The rowboat sentinel is
+      // a literal @rowboat insertion — not a file mention.
+      if (path !== ROWBOAT_MENTION_SENTINEL) {
+        const fullPath = toKnowledgePath(path);
+        if (fullPath && mentionsCtx) {
+          mentionsCtx.addMention(fullPath, displayName);
+        }
       }
 
       // Focus back on textarea
@@ -1014,13 +1025,16 @@ export const PromptInputTextarea = ({
   );
 
   const handleMentionClose = useCallback(() => {
-    // The popover handles its own closing
+    setMentionDismissed(true);
   }, []);
 
   const handleKeyDown: KeyboardEventHandler<HTMLTextAreaElement> = (e) => {
-    // If mention popover is open, let it handle navigation keys
-    if (activeMention && ["ArrowDown", "ArrowUp", "Tab"].includes(e.key)) {
-      // Don't prevent default here - the popover handles this via document listener
+    // If mention popover is open, let it handle navigation keys. Prevent the
+    // browser defaults here too: in the frame between "@" appearing and the
+    // popover's document listener attaching, an early Tab would otherwise
+    // move focus out of the textarea entirely.
+    if (activeMention && !mentionDismissed && ["ArrowDown", "ArrowUp", "Tab"].includes(e.key)) {
+      e.preventDefault();
       return;
     }
 
@@ -1110,9 +1124,9 @@ export const PromptInputTextarea = ({
       }
     }
 
-    // Close mention popover on Escape
-    if (e.key === "Escape" && activeMention) {
-      // Let the popover handle this
+    // Close mention popover on Escape (the popover's capture listener does
+    // the closing; swallow it here so outer Escapes don't also fire).
+    if (e.key === "Escape" && activeMention && !mentionDismissed) {
       return;
     }
 
@@ -1162,7 +1176,8 @@ export const PromptInputTextarea = ({
         <div
           ref={highlightRef}
           aria-hidden="true"
-          className="pointer-events-none absolute inset-0 z-0 overflow-hidden whitespace-pre-wrap break-words text-sm text-transparent"
+          dir="auto"
+          className="pointer-events-none absolute inset-0 z-0 overflow-hidden whitespace-pre-wrap break-words text-[15px] leading-6 text-transparent"
         >
           {mentionHighlights.segments.map((segment, index) =>
             segment.highlighted ? (
@@ -1180,7 +1195,14 @@ export const PromptInputTextarea = ({
       )}
       <InputGroupTextarea
         ref={textareaRef}
-        className={cn("relative z-10 !p-0 field-sizing-content max-h-48 min-h-10", className)}
+        dir="auto"
+        className={cn(
+          // composer text matches message prose (15px). The highlight
+          // overlay above must keep identical font metrics or mention boxes
+          // drift from the caret.
+          "relative z-10 !p-0 field-sizing-content max-h-48 min-h-10 text-[15px] leading-6",
+          className
+        )}
         name="message"
         onCompositionEnd={() => setIsComposing(false)}
         onCompositionStart={() => setIsComposing(true)}
@@ -1201,7 +1223,7 @@ export const PromptInputTextarea = ({
           containerRef={containerRef}
           onSelect={handleMentionSelect}
           onClose={handleMentionClose}
-          open={Boolean(activeMention)}
+          open={Boolean(activeMention) && !mentionDismissed}
         />
       )}
     </div>

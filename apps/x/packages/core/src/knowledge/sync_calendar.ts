@@ -30,6 +30,10 @@ function formatEventTime(event: AnyEvent): string {
     return `${startStr} → ${endStr}`;
 }
 
+function shouldSyncCalendarEvent(event: cal.Schema$Event): boolean {
+    return event.eventType !== 'workingLocation';
+}
+
 function formatEventBlock(event: AnyEvent, label: 'NEW' | 'UPDATED'): string {
     const id = getStr(event, 'id') ?? '(unknown id)';
     const title = getStr(event, 'summary') ?? '(no title)';
@@ -169,6 +173,27 @@ function interruptibleSleep(ms: number): Promise<void> {
 
 function cleanFilename(name: string): string {
     return name.replace(/[\\/*?:"<>|]/g, "").replace(/\s+/g, "_").substring(0, 100).trim();
+}
+
+// --- Write-path hooks (calendar_write.ts) ---
+// Persist an event returned by an insert/patch straight into the sync dir so
+// the renderer's file watcher picks it up immediately, without waiting for the
+// next poll. The poll then reconciles anything we got wrong.
+
+export async function persistSyncedEvent(event: cal.Schema$Event): Promise<void> {
+    if (!fs.existsSync(SYNC_DIR)) {
+        fs.mkdirSync(SYNC_DIR, { recursive: true });
+    }
+    await saveEvent(event, SYNC_DIR);
+}
+
+export function removeSyncedEvent(eventId: string): void {
+    const filePath = path.join(SYNC_DIR, `${eventId}.json`);
+    try {
+        if (fs.existsSync(filePath)) fs.unlinkSync(filePath);
+    } catch (e) {
+        console.error(`[Calendar] Error removing synced event ${eventId}:`, e);
+    }
 }
 
 // --- Sync Logic ---
@@ -347,6 +372,9 @@ async function syncCalendarWindow(auth: OAuth2Client, syncDir: string, lookbackD
             console.log(`Found ${events.length} events.`);
             for (const event of events) {
                 if (event.id) {
+                    if (!shouldSyncCalendarEvent(event)) {
+                        continue;
+                    }
                     const result = await saveEvent(event, syncDir);
                     const attachmentsSaved = await processAttachments(drive, event, syncDir);
                     currentEventIds.add(event.id);

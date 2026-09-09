@@ -1,9 +1,8 @@
 import type { LiveNote, LiveNoteTriggerType } from '@x/shared/dist/live-note.js';
 import { fetchLiveNote, patchLiveNote, readNoteBody } from './fileops.js';
-import { createRun, createMessage } from '../../runs/runs.js';
 import { getLiveNoteAgentModel } from '../../models/defaults.js';
-import { extractAgentResponse, waitForRunCompletion } from '../../agents/utils.js';
-import { buildTriggerBlock } from '../../agents/build-trigger-block.js';
+import { startHeadlessAgent, startWhenPossible } from '../../runtime/assembly/headless-app.js';
+import { buildTriggerBlock } from '../../runtime/assembly/build-trigger-block.js';
 import { liveNoteBus } from './bus.js';
 import { PrefixLogger } from '@x/shared/dist/prefix-logger.js';
 
@@ -30,7 +29,7 @@ function truncate(s: string | null | undefined, n = SUMMARY_LOG_LIMIT): string {
 // Agent run message
 // ---------------------------------------------------------------------------
 
-const LIVE_NOTE_EVENT_DECISION_DIRECTIVE = '**Decision:** Determine whether this event genuinely warrants updating the note. If the event is not meaningfully relevant on closer inspection, skip the update — do not call `workspace-edit`. Only edit the file if the event provides new or changed information that the objective implies should be reflected.';
+const LIVE_NOTE_EVENT_DECISION_DIRECTIVE = '**Decision:** Determine whether this event genuinely warrants updating the note. If the event is not meaningfully relevant on closer inspection, skip the update — do not call `file-editText`. Only edit the file if the event provides new or changed information that the objective implies should be reflected.';
 
 const LIVE_NOTE_MANUAL_PAREN = 'user-triggered — either the Run button in the Live Note panel or the `run-live-note-agent` tool';
 
@@ -44,8 +43,8 @@ function buildMessage(
     const localNow = now.toLocaleString('en-US', { dateStyle: 'full', timeStyle: 'long' });
     const tz = Intl.DateTimeFormat().resolvedOptions().timeZone;
 
-    // Workspace-relative path the agent's tools (workspace-readFile,
-    // workspace-edit) expect. Internal storage is knowledge/-relative.
+    // Workspace-relative path the agent's tools (file-readText,
+    // file-editText) expect. Internal storage is knowledge/-relative.
     const wsPath = `knowledge/${filePath}`;
 
     const baseMessage = `Update the live note at \`${wsPath}\`.
@@ -55,7 +54,7 @@ function buildMessage(
 **Objective:**
 ${live.objective}
 
-Start by calling \`workspace-readFile\` on \`${wsPath}\` to read the current note (frontmatter + body) — the body may be long and you should fetch it yourself rather than rely on a snapshot. Then make small, incremental edits with \`workspace-edit\` to bring the body in line with the objective: edit one region, re-read to verify, then edit the next region. Avoid one-shot rewrites of the whole body. Do not modify the YAML frontmatter at the top of the file — that block is owned by the user and the runtime.`;
+Start by calling \`file-readText\` on \`${wsPath}\` to read the current note (frontmatter + body) — the body may be long and you should fetch it yourself rather than rely on a snapshot. Then make small, incremental edits with \`file-editText\` to bring the body in line with the objective: edit one region, re-read to verify, then edit the next region. Avoid one-shot rewrites of the whole body. Do not modify the YAML frontmatter at the top of the file — that block is owned by the user and the runtime.`;
 
     return baseMessage + buildTriggerBlock({
         trigger,
@@ -108,18 +107,33 @@ export async function runLiveNoteAgent(
 
         const bodyBefore = await readNoteBody(filePath);
 
-        const model = live.model ?? await getLiveNoteAgentModel();
-        const agentRun = await createRun({
+        // Note-frontmatter model/provider win; otherwise the category default
+        // (provider-qualified in hybrid mode). A frontmatter model without a
+        // provider keeps the legacy meaning: the app-default provider.
+        const selection = await getLiveNoteAgentModel();
+        const model = live.model ?? selection.model;
+        const provider = live.provider ?? (live.model ? undefined : selection.provider);
+        // Effort pairs with whichever source supplied the model: an explicit
+        // note effort always wins; otherwise the category selection's effort
+        // applies only when the note didn't pin its own model.
+        const effort = live.effort ?? (live.model ? undefined : selection.effort);
+        // Manual runs are user-requested (the Run button, or the copilot's
+        // run-live-note-agent tool mid-chat) and must NOT wait for chat-idle:
+        // the requesting chat turn holds the chat-activity lock, so deferring
+        // here would deadlock the turn. Only autonomous triggers
+        // (cron/window/event) defer.
+        const start = trigger === 'manual' ? startHeadlessAgent : startWhenPossible;
+        const handle = await start({
             agentId: 'live-note-agent',
-            model,
-            ...(live.provider ? { provider: live.provider } : {}),
+            message: buildMessage(filePath, live, trigger, context),
             useCase: 'live_note_agent',
-            // Use the granular trigger as the analytics sub-use-case so
-            // dashboards can break down agent runs by what woke them up
-            // (manual / cron / window / event). Pass 1 routing emits the
-            // separate `routing` sub-use-case from routing.ts.
             subUseCase: trigger,
+            model,
+            ...(provider ? { provider } : {}),
+            ...(effort ? { reasoningEffort: effort } : {}),
+            throwOnError: true,
         });
+        const agentRun = { id: handle.turnId };
 
         log.log(`${filePath} — start trigger=${trigger} runId=${agentRun.id}`);
 
@@ -141,14 +155,11 @@ export async function runLiveNoteAgent(
         });
 
         try {
-            await createMessage(agentRun.id, buildMessage(filePath, live, trigger, context));
-            // throwOnError: surface any error event in the run's log (LLM API
-            // failures, tool errors, billing/credit issues) as a rejection so
-            // the failure branch records lastRunError. Without this the run
-            // can "complete" with errors silently and we'd hit the success
-            // branch with an empty summary, clobbering any prior lastRunError.
-            await waitForRunCompletion(agentRun.id, { throwOnError: true });
-            const summary = await extractAgentResponse(agentRun.id);
+            // throwOnError: a failed/cancelled turn rejects here so the
+            // failure branch records lastRunError. Without this the turn
+            // could settle silently and we'd hit the success branch with an
+            // empty summary, clobbering any prior lastRunError.
+            const { summary } = await handle.done;
 
             const bodyAfter = await readNoteBody(filePath);
             const didUpdate = bodyAfter !== bodyBefore;

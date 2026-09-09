@@ -1,6 +1,10 @@
 import { LlmStepStreamEvent } from "./llm-step-events.js";
 import { Message, ToolCallPart } from "./message.js";
+import { CodeRunEvent as CodeRunEventSchema, PermissionAsk } from "./code-mode.js";
+import { UseCase } from "./analytics.js";
 import z from "zod";
+
+export { UseCase } from "./analytics.js";
 
 const BaseRunEvent = z.object({
     runId: z.string(),
@@ -21,15 +25,10 @@ export const StartEvent = BaseRunEvent.extend({
     agentName: z.string(),
     model: z.string(),
     provider: z.string(),
+    permissionMode: z.enum(["manual", "auto"]).optional(),
     // useCase/subUseCase tag the run for analytics. Optional on read so legacy
     // run files written before these fields existed still parse cleanly.
-    useCase: z.enum([
-        "copilot_chat",
-        "live_note_agent",
-        "background_task_agent",
-        "meeting_note",
-        "knowledge_sync",
-    ]).optional(),
+    useCase: UseCase.optional(),
     subUseCase: z.string().optional(),
 });
 
@@ -75,6 +74,10 @@ export const AskHumanRequestEvent = BaseRunEvent.extend({
     type: z.literal("ask-human-request"),
     toolCallId: z.string(),
     query: z.string(),
+    options: z.array(z.string()).optional(),
+    // Render options as multi-select (pick all that apply); the answer is the
+    // selected labels joined with ", ".
+    multiSelect: z.boolean().optional(),
 });
 
 export const AskHumanResponseEvent = BaseRunEvent.extend({
@@ -83,9 +86,41 @@ export const AskHumanResponseEvent = BaseRunEvent.extend({
     response: z.string(),
 });
 
+export const ToolPermissionMetadata = z.discriminatedUnion("kind", [
+    z.object({
+        kind: z.literal("command"),
+        commandNames: z.array(z.string()),
+    }),
+    z.object({
+        kind: z.literal("file"),
+        operation: z.enum(["read", "list", "search", "write", "delete"]),
+        paths: z.array(z.string()),
+        pathPrefix: z.string(),
+    }),
+    // A Composio action execution (composio-execute-tool).
+    z.object({
+        kind: z.literal("composio"),
+        toolkitSlug: z.string(),
+        toolSlug: z.string(),
+    }),
+    // An MCP tool execution (executeMcpTool or an mcp:* attachment).
+    z.object({
+        kind: z.literal("mcp"),
+        serverName: z.string().optional(),
+        toolName: z.string(),
+    }),
+    // Generic fail-closed request: a tool with no more specific policy.
+    z.object({
+        kind: z.literal("tool"),
+        toolId: z.string(),
+        toolName: z.string(),
+    }),
+]);
+
 export const ToolPermissionRequestEvent = BaseRunEvent.extend({
     type: z.literal("tool-permission-request"),
     toolCall: ToolCallPart,
+    permission: ToolPermissionMetadata.optional(),
 });
 
 export const ToolPermissionResponseEvent = BaseRunEvent.extend({
@@ -93,6 +128,43 @@ export const ToolPermissionResponseEvent = BaseRunEvent.extend({
     toolCallId: z.string(),
     response: z.enum(["approve", "deny"]),
     scope: z.enum(["once", "session", "always"]).optional(),
+});
+
+// A structured item from a code_agent_run coding turn (tool call, diff, plan,
+// message chunk, resolved permission). Fire-and-forget — rendered live.
+export const CodeRunStreamEvent = BaseRunEvent.extend({
+    type: z.literal("code-run-event"),
+    toolCallId: z.string(),
+    event: CodeRunEventSchema,
+});
+
+// The coding agent is asking for permission mid-turn and the run is BLOCKED until
+// the user answers via `codeRun:resolvePermission` (keyed by requestId).
+export const CodeRunPermissionRequestEvent = BaseRunEvent.extend({
+    type: z.literal("code-run-permission-request"),
+    toolCallId: z.string(),
+    requestId: z.string(),
+    ask: PermissionAsk,
+});
+
+// The complete, ordered code-run timeline, published ONCE when the coding turn
+// settles (consecutive agent message chunks coalesced — display-lossless, the
+// timeline concatenates them anyway). This is the durable record; the live
+// per-event stream travels over the ephemeral CodeRunFeed (`codeRun:events`)
+// and is never persisted.
+export const CodeRunEventsBatchEvent = BaseRunEvent.extend({
+    type: z.literal("code-run-events-batch"),
+    toolCallId: z.string(),
+    events: z.array(CodeRunEventSchema),
+});
+
+export const ToolPermissionAutoDecisionEvent = BaseRunEvent.extend({
+    type: z.literal("tool-permission-auto-decision"),
+    toolCallId: z.string(),
+    toolCall: ToolCallPart,
+    permission: ToolPermissionMetadata.optional(),
+    decision: z.enum(["allow", "deny"]),
+    reason: z.string(),
 });
 
 export const RunErrorEvent = BaseRunEvent.extend({
@@ -119,6 +191,10 @@ export const RunEvent = z.union([
     AskHumanResponseEvent,
     ToolPermissionRequestEvent,
     ToolPermissionResponseEvent,
+    CodeRunStreamEvent,
+    CodeRunPermissionRequestEvent,
+    CodeRunEventsBatchEvent,
+    ToolPermissionAutoDecisionEvent,
     RunErrorEvent,
     RunStoppedEvent,
 ]);
@@ -136,14 +212,6 @@ export const AskHumanResponsePayload = AskHumanResponseEvent.pick({
     response: true,
 });
 
-export const UseCase = z.enum([
-    "copilot_chat",
-    "live_note_agent",
-    "background_task_agent",
-    "meeting_note",
-    "knowledge_sync",
-]);
-
 export const Run = z.object({
     id: z.string(),
     title: z.string().optional(),
@@ -151,6 +219,7 @@ export const Run = z.object({
     agentId: z.string(),
     model: z.string(),
     provider: z.string(),
+    permissionMode: z.enum(["manual", "auto"]).optional(),
     useCase: UseCase.optional(),
     subUseCase: z.string().optional(),
     log: z.array(RunEvent),
@@ -162,6 +231,11 @@ export const ListRunsResponse = z.object({
         title: true,
         createdAt: true,
         agentId: true,
+        useCase: true,
+    }).extend({
+        // Last-modified time of the run's log file (mtime), used to order the
+        // chat history by recent activity rather than creation time.
+        modifiedAt: z.iso.datetime(),
     })),
     nextCursor: z.string().optional(),
 });
@@ -170,6 +244,7 @@ export const CreateRunOptions = z.object({
     agentId: z.string(),
     model: z.string().optional(),
     provider: z.string().optional(),
+    permissionMode: z.enum(["manual", "auto"]).optional(),
     useCase: UseCase.optional(),
     subUseCase: z.string().optional(),
 });

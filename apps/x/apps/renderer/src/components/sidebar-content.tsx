@@ -1,51 +1,35 @@
 "use client"
 
 import * as React from "react"
-import { useCallback, useEffect, useRef, useState } from "react"
+import { useCallback, useEffect, useMemo, useRef, useState } from "react"
 import {
+  AppWindow,
+  ArrowUpRight,
   Bot,
   ChevronRight,
-  ChevronsDownUp,
-  ChevronsUpDown,
-  Copy,
-  ExternalLink,
-  FilePlus,
+  Code2,
+  FileText,
   Folder,
-  FolderOpen,
-  FolderPlus,
   Globe,
   AlertTriangle,
-  HelpCircle,
+  Home,
+  LayoutGrid,
   Mic,
-  Network,
+  MoreVertical,
+  PanelLeftClose,
   Pencil,
-  Radio,
-  SearchIcon,
-  SquarePen,
-  Table2,
+  Pin,
+  Trash2,
   Plug,
-  Lightbulb,
-  ListChecks,
   LoaderIcon,
   Mail,
+  MessageSquare,
   Settings,
   Square,
-  Trash2,
+  Video,
+  CircleAlert,
+  X,
 } from "lucide-react"
-
-import {
-  Collapsible,
-  CollapsibleContent,
-  CollapsibleTrigger,
-} from "@/components/ui/collapsible"
-import {
-  Dialog,
-  DialogContent,
-  DialogDescription,
-  DialogFooter,
-  DialogHeader,
-  DialogTitle,
-} from "@/components/ui/dialog"
 import {
   AlertDialog,
   AlertDialogAction,
@@ -57,7 +41,6 @@ import {
   AlertDialogTitle,
   AlertDialogTrigger,
 } from "@/components/ui/alert-dialog"
-import { Button } from "@/components/ui/button"
 import {
   Sidebar,
   SidebarContent,
@@ -66,10 +49,8 @@ import {
   SidebarGroupContent,
   SidebarHeader,
   SidebarMenu,
-  SidebarMenuAction,
   SidebarMenuButton,
   SidebarMenuItem,
-  SidebarMenuSub,
   SidebarRail,
   useSidebar,
 } from "@/components/ui/sidebar"
@@ -77,6 +58,7 @@ import {
   Popover,
   PopoverContent,
   PopoverTrigger,
+  PopoverArrow,
 } from "@/components/ui/popover"
 import {
   Tooltip,
@@ -84,21 +66,31 @@ import {
   TooltipTrigger,
 } from "@/components/ui/tooltip"
 import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuTrigger,
+} from "@/components/ui/dropdown-menu"
+import {
   ContextMenu,
   ContextMenuContent,
   ContextMenuItem,
-  ContextMenuSeparator,
   ContextMenuTrigger,
 } from "@/components/ui/context-menu"
-import { Input } from "@/components/ui/input"
 import { cn } from "@/lib/utils"
-import { type ActiveSection, useSidebarSection } from "@/contexts/sidebar-context"
-import { ConnectorsPopover } from "@/components/connectors-popover"
-import { HelpPopover } from "@/components/help-popover"
+import { getPinnedApps, onPinnedAppsChanged, unpinApp } from "@/lib/pinned-apps"
+import { isOutOfCredits, CREDIT_EXHAUSTED_EVENT, CREDIT_REPLENISHED_EVENT } from "@/lib/credit-status"
 import { SettingsDialog } from "@/components/settings-dialog"
-import { toast } from "@/lib/toast"
-import { formatRelativeTime as formatRunTime } from "@/lib/relative-time"
+import { SidebarCreditRewards } from "@/components/sidebar-credit-rewards"
+import { SpacesSidebarSection } from "@/components/spaces-sidebar-section"
+import { SPACES_ENABLED } from "@/lib/feature-flags"
+import type { SpaceSelection } from "@/components/spaces-view"
+import { MascotFaceIcon } from "@/components/talking-head"
+import { extractConferenceLink } from "@/lib/calendar-event"
 import { useBilling } from "@/hooks/useBilling"
+import { useRowboatConfig } from "@/hooks/use-rowboat-config"
+import { toast } from "@/lib/toast"
+import { getBillingPlanData } from "@x/shared/dist/billing.js"
 import { ServiceEvent } from "@x/shared/src/service-events.js"
 import z from "zod"
 
@@ -108,6 +100,7 @@ interface TreeNode {
   kind: "file" | "dir"
   children?: TreeNode[]
   loaded?: boolean
+  stat?: { size: number; mtimeMs: number }
 }
 
 type KnowledgeActions = {
@@ -115,6 +108,9 @@ type KnowledgeActions = {
   createFolder: (parentPath?: string) => Promise<string>
   openGraph: () => void
   openBases: () => void
+  openKnowledgeView: () => void
+  openWorkspaceAt: (path?: string) => void
+  createWorkspace: (name: string) => Promise<string>
   expandAll: () => void
   collapseAll: () => void
   rename: (path: string, newName: string, isDir: boolean) => Promise<void>
@@ -124,45 +120,41 @@ type KnowledgeActions = {
   onOpenInNewTab?: (path: string) => void
 }
 
-function getFileManagerName(): string {
-  if (typeof navigator === 'undefined') return 'File Manager'
-  const platform = navigator.platform.toLowerCase()
-  if (platform.includes('mac')) return 'Finder'
-  if (platform.includes('win')) return 'Explorer'
-  return 'File Manager'
+function formatAgo(ms: number): string {
+  const diffMs = Math.max(0, Date.now() - ms)
+  const min = Math.floor(diffMs / 60000)
+  if (min < 1) return 'just now'
+  if (min < 60) return `${min}m ago`
+  const hr = Math.floor(min / 60)
+  if (hr < 24) return `${hr}h ago`
+  const day = Math.floor(hr / 24)
+  if (day < 7) return `${day}d ago`
+  const wk = Math.floor(day / 7)
+  if (wk < 4) return `${wk}w ago`
+  const mo = Math.max(1, Math.floor(day / 30))
+  return `${mo}mo ago`
 }
 
-type RunListItem = {
-  id: string
-  title?: string
-  createdAt: string
-  agentId: string
-}
-
-type BackgroundTaskItem = {
+type TaskSummary = {
+  slug: string
   name: string
-  description?: string
-  schedule: {
-    type: "cron" | "window" | "once"
-    expression?: string
-    cron?: string
-    startTime?: string
-    endTime?: string
-    runAt?: string
-  }
-  enabled: boolean
-  status?: "scheduled" | "running" | "finished" | "failed" | "triggered"
-  nextRunAt?: string | null
-  lastRunAt?: string | null
+  active: boolean
+  createdAt: string
+  lastAttemptAt?: string
+  lastRunAt?: string
+  lastRunError?: string
 }
 
 type ServiceEventType = z.infer<typeof ServiceEvent>
 
 const MAX_SYNC_EVENTS = 1000
 const RUN_STALE_MS = 2 * 60 * 60 * 1000
+const PINNED_CHATS_STORAGE_KEY = 'x:pinned-chats'
+const MAX_PINNED_CHATS = 3
 
 const SERVICE_LABELS: Record<string, string> = {
   gmail: "Syncing Gmail",
+  outlook: "Syncing Outlook",
   calendar: "Syncing Calendar",
   fireflies: "Syncing Fireflies",
   granola: "Syncing Granola",
@@ -192,49 +184,43 @@ function collectServiceErrors(events: ServiceEventType[]): Map<string, string> {
   return errors
 }
 
-type TasksActions = {
-  onNewChat: () => void
-  onSelectRun: (runId: string) => void
-  onDeleteRun: (runId: string) => void
-  onOpenInNewTab?: (runId: string) => void
-  onSelectBackgroundTask?: (taskName: string) => void
-}
-
 type SidebarContentPanelProps = {
   tree: TreeNode[]
-  selectedPath: string | null
-  expandedPaths: Set<string>
   onSelectFile: (path: string, kind: "file" | "dir") => void
-  onToggleFolder?: (path: string) => void
   knowledgeActions: KnowledgeActions
-  onVoiceNoteCreated?: (path: string) => void
-  runs?: RunListItem[]
-  currentRunId?: string | null
-  processingRunIds?: Set<string>
-  tasksActions?: TasksActions
-  backgroundTasks?: BackgroundTaskItem[]
-  selectedBackgroundTask?: string | null
-  onNewChat?: () => void
-  onOpenSearch?: () => void
-  isSearchOpen?: boolean
-  isBrowserOpen?: boolean
-  onToggleBrowser?: () => void
-  isSuggestedTopicsOpen?: boolean
-  onOpenSuggestedTopics?: () => void
-  isMeetingsOpen?: boolean
+  bgTaskSummaries?: TaskSummary[]
   onOpenMeetings?: () => void
-  isLiveNotesOpen?: boolean
-  onOpenLiveNotes?: () => void
-  isBgTasksOpen?: boolean
+  onOpenCode?: () => void
   onOpenBgTasks?: () => void
-  isEmailOpen?: boolean
-  onOpenEmail?: () => void
+  onOpenApps?: () => void
+  /** Open a specific app (pinned in the sidebar) inside the Apps view. */
+  onOpenApp?: (folder: string) => void
+  /** Open one space (org + space) in the Spaces view. */
+  onOpenSpace?: (orgId: string, spaceId: string) => void
+  /** The space currently open, for highlighting its sidebar row. */
+  activeSpace?: SpaceSelection
+  onOpenAgent?: (slug: string) => void
+  recentRuns?: { id: string; title?: string; createdAt: string; modifiedAt?: string }[]
+  onOpenRun?: (runId: string) => void
+  /** Persist a custom chat title (sessions:setTitle) and refresh the runs list. */
+  onRenameRun?: (runId: string, title: string) => void
+  /** Delete the chat's session (sessions:delete) and refresh the runs list. */
+  onDeleteRun?: (runId: string) => void
+  onOpenChatHistory?: () => void
+  onOpenEmail?: (threadId?: string) => void
+  onOpenHome?: () => void
+  onNewChat?: () => void
+  onToggleBrowser?: () => void
+  onVoiceNoteCreated?: (path: string) => void
+  /** Starts the mascot-guided product tour. */
+  onStartTour?: () => void
+  /** Which primary destination is currently active, for nav highlighting. */
+  activeNav?: 'assistant' | 'home' | 'email' | 'meetings' | 'code' | 'knowledge' | 'agents' | 'apps' | 'spaces' | 'workspaces' | null
+  /** Live meeting recording state, so the recording row can show its indicator/stop. */
+  meetingRecordingState?: 'idle' | 'connecting' | 'recording' | 'stopping'
+  recordingMeetingSource?: string | null
+  onToggleMeetingRecording?: () => void
 } & React.ComponentProps<typeof Sidebar>
-
-const sectionTabs: { id: ActiveSection; label: string }[] = [
-  { id: "tasks", label: "Chat" },
-  { id: "knowledge", label: "Knowledge" },
-]
 
 function formatEventTime(ts: string): string {
   const date = new Date(ts)
@@ -374,7 +360,7 @@ function SyncStatusBar() {
           <LoaderIcon className="h-4 w-4 animate-spin text-muted-foreground" />
         </div>
       )}
-      <SidebarFooter className="border-t border-sidebar-border px-2 py-2">
+      <SidebarFooter className="border-t border-border px-2 py-2">
         <Popover open={popoverOpen} onOpenChange={setPopoverOpen}>
           <PopoverTrigger asChild>
             <button
@@ -463,51 +449,281 @@ function SyncStatusBar() {
 
 export function SidebarContentPanel({
   tree,
-  selectedPath,
-  expandedPaths,
-  onSelectFile,
-  onToggleFolder,
   knowledgeActions,
-  onVoiceNoteCreated,
-  runs = [],
-  currentRunId,
-  processingRunIds,
-  tasksActions,
-  backgroundTasks = [],
-  selectedBackgroundTask,
-  onNewChat,
-  onOpenSearch,
-  isSearchOpen = false,
-  isBrowserOpen = false,
-  onToggleBrowser,
-  isSuggestedTopicsOpen = false,
-  onOpenSuggestedTopics,
-  isMeetingsOpen = false,
+  bgTaskSummaries = [],
   onOpenMeetings,
-  isLiveNotesOpen = false,
-  onOpenLiveNotes,
-  isBgTasksOpen = false,
+  onOpenCode,
   onOpenBgTasks,
-  isEmailOpen = false,
+  onOpenApps,
+  onOpenApp,
+  onOpenSpace,
+  activeSpace = null,
+  recentRuns = [],
+  onOpenRun,
+  onRenameRun,
+  onDeleteRun,
+  onOpenChatHistory,
   onOpenEmail,
+  onOpenHome,
+  onNewChat,
+  onToggleBrowser,
+  onVoiceNoteCreated,
+  onStartTour,
+  activeNav,
+  meetingRecordingState = 'idle',
+  recordingMeetingSource = null,
+  onToggleMeetingRecording,
   ...props
 }: SidebarContentPanelProps) {
-  const { activeSection, setActiveSection } = useSidebarSection()
   const [hasOauthError, setHasOauthError] = useState(false)
   const [showOauthAlert, setShowOauthAlert] = useState(true)
-  const [connectorsOpen, setConnectorsOpen] = useState(false)
-  const [openConnectorsAfterClose, setOpenConnectorsAfterClose] = useState(false)
+  const [connectionsSettingsOpen, setConnectionsSettingsOpen] = useState(false)
+  const [openConnectionsAfterClose, setOpenConnectionsAfterClose] = useState(false)
   const connectorsButtonRef = useRef<HTMLButtonElement | null>(null)
   const [isRowboatConnected, setIsRowboatConnected] = useState(false)
+  const [creditPopoverOpen, setCreditPopoverOpen] = useState(false)
+  const [outOfCredits, setOutOfCredits] = useState(false)
+  const outOfCreditsRef = useRef(false)
+  const creditPopoverAutoShownRef = useRef(false)
   const [loggingIn, setLoggingIn] = useState(false)
-  const [appUrl, setAppUrl] = useState<string | null>(null)
-  const { billing } = useBilling(isRowboatConnected)
-  const isBrowserQuickActionSelected = isBrowserOpen && !isSearchOpen
-  const isSuggestedTopicsQuickActionSelected = isSuggestedTopicsOpen && !isBrowserOpen
-  const isMeetingsQuickActionSelected = isMeetingsOpen && !isBrowserOpen
-  const isLiveNotesQuickActionSelected = isLiveNotesOpen && !isBrowserOpen
-  const isBgTasksQuickActionSelected = isBgTasksOpen && !isBrowserOpen
-  const isEmailQuickActionSelected = isEmailOpen && !isBrowserOpen
+  const appUrl = useRowboatConfig()?.appUrl ?? null
+  const { billing, refresh: refreshBilling } = useBilling(isRowboatConnected)
+  const currentBillingPlan = billing ? getBillingPlanData(billing.catalog, billing.subscriptionPlanId) : null
+
+  // Nav previews: unread important emails + next upcoming meetings (top 2 each).
+  const [unreadEmailCount, setUnreadEmailCount] = useState(0)
+  const [emailThreads, setEmailThreads] = useState<SidebarEmailThread[]>([])
+  const [meetings, setMeetings] = useState<UpcomingMeeting[]>([])
+  const [chatsExpanded, setChatsExpanded] = useState(true)
+  // The Code section only makes sense with a coding agent available — same
+  // flag the chat composer's code chip uses (auto-on when Claude Code or
+  // Codex is installed + signed in; explicit toggle in settings wins).
+  const [codeModeEnabled, setCodeModeEnabled] = useState(false)
+
+  useEffect(() => {
+    const load = () => {
+      window.ipc.invoke('codeMode:getConfig', null)
+        .then((r) => setCodeModeEnabled(r.enabled))
+        .catch(() => setCodeModeEnabled(false))
+    }
+    load()
+    window.addEventListener('code-mode-config-changed', load)
+    return () => window.removeEventListener('code-mode-config-changed', load)
+  }, [])
+
+  useEffect(() => {
+    let cancelled = false
+    const loadEmail = async () => {
+      try {
+        const result = await window.ipc.invoke('gmail:getImportant', { limit: 50 })
+        if (cancelled) return
+        const unread = result.threads.filter((t) => t.unread === true)
+        setUnreadEmailCount(unread.length)
+        setEmailThreads(unread.slice(0, 1).map((t) => ({
+          threadId: t.threadId,
+          subject: t.subject ?? '(No subject)',
+          from: t.from ?? '',
+          date: t.date ?? '',
+        })))
+      } catch { /* ignore */ }
+    }
+    void loadEmail()
+    const cleanup = window.ipc.on('workspace:didChange', (event) => {
+      const paths = event.type === 'bulkChanged' ? (event.paths ?? [])
+        : event.type === 'moved' ? [event.from, event.to]
+        : 'path' in event ? [event.path] : []
+      if (paths.some((p) => typeof p === 'string' && p.startsWith('gmail_sync'))) void loadEmail()
+    })
+    return () => { cancelled = true; cleanup() }
+  }, [])
+
+  useEffect(() => {
+    let cancelled = false
+    const loadNext = async () => {
+      try {
+        const exists = await window.ipc.invoke('workspace:exists', { path: 'calendar_sync' })
+        if (!exists.exists) { if (!cancelled) setMeetings([]); return }
+        const entries = await window.ipc.invoke('workspace:readdir', {
+          path: 'calendar_sync',
+          opts: { recursive: false, includeHidden: false, includeStats: false },
+        })
+        const jsonEntries = entries.filter((e) => e.kind === 'file' && e.name.endsWith('.json'))
+        const settled = await Promise.allSettled(jsonEntries.map(async (entry) => {
+          const result = await window.ipc.invoke('workspace:readFile', { path: entry.path, encoding: 'utf8' })
+          return normalizeUpcomingMeeting(JSON.parse(result.data) as RawCalendarEvent, entry.path)
+        }))
+        const items: UpcomingMeeting[] = []
+        for (const r of settled) if (r.status === 'fulfilled' && r.value) items.push(r.value)
+        items.sort((a, b) => {
+          if (a.isAllDay !== b.isAllDay) return a.isAllDay ? -1 : 1
+          return a.start.getTime() - b.start.getTime()
+        })
+        if (!cancelled) setMeetings(items.slice(0, 1))
+      } catch { /* ignore */ }
+    }
+    void loadNext()
+    const cleanup = window.ipc.on('workspace:didChange', (event) => {
+      const paths = event.type === 'bulkChanged' ? (event.paths ?? [])
+        : event.type === 'moved' ? [event.from, event.to]
+        : 'path' in event ? [event.path] : []
+      if (paths.some((p) => typeof p === 'string' && p.startsWith('calendar_sync'))) void loadNext()
+    })
+    const tick = setInterval(() => void loadNext(), 60 * 60 * 1000)
+    return () => { cancelled = true; clearInterval(tick); cleanup() }
+  }, [])
+
+  const recentNotes = React.useMemo<TreeNode[]>(() => {
+    const out: TreeNode[] = []
+    const walk = (nodes: TreeNode[]) => {
+      for (const n of nodes) {
+        if (n.path === 'knowledge/Meetings' || n.path === 'knowledge/Workspace' || n.path === 'knowledge/Agent Notes') continue
+        if (n.kind === 'file') out.push(n)
+        else if (n.children?.length) walk(n.children)
+      }
+    }
+    walk(tree)
+    return out
+      .filter((n) => n.stat?.mtimeMs)
+      .sort((a, b) => (b.stat?.mtimeMs ?? 0) - (a.stat?.mtimeMs ?? 0))
+      .slice(0, 10)
+  }, [tree])
+
+  // The most recently touched chat, for the Assistant row (recency only —
+  // pinning shouldn't hijack "continue where I left off"). Mirrors the dock.
+  const lastChat = useMemo(() => {
+    const recency = (r: { createdAt: string; modifiedAt?: string }) => {
+      const ms = new Date(r.modifiedAt ?? r.createdAt).getTime()
+      return Number.isFinite(ms) ? ms : 0
+    }
+    return [...recentRuns].sort((a, b) => recency(b) - recency(a))[0] ?? null
+  }, [recentRuns])
+
+  // Pinned chats: a per-machine UI preference, persisted in localStorage.
+  const [pinnedChatIds, setPinnedChatIds] = useState<string[]>(() => {
+    try {
+      const raw = window.localStorage.getItem(PINNED_CHATS_STORAGE_KEY)
+      const parsed: unknown = raw ? JSON.parse(raw) : []
+      return Array.isArray(parsed) ? parsed.filter((x): x is string => typeof x === 'string') : []
+    } catch {
+      return []
+    }
+  })
+  const toggleChatPin = useCallback((chatId: string) => {
+    const isPinned = pinnedChatIds.includes(chatId)
+    // Count only pins that still resolve to a chat — deleted chats leave
+    // stale ids in localStorage and must not eat pin slots.
+    const activePinCount = pinnedChatIds.filter((id) => recentRuns.some((r) => r.id === id)).length
+    if (!isPinned && activePinCount >= MAX_PINNED_CHATS) {
+      toast(`You can pin up to ${MAX_PINNED_CHATS} chats`, 'error')
+      return
+    }
+    const next = isPinned ? pinnedChatIds.filter((id) => id !== chatId) : [...pinnedChatIds, chatId]
+    try {
+      window.localStorage.setItem(PINNED_CHATS_STORAGE_KEY, JSON.stringify(next))
+    } catch { /* ignore */ }
+    setPinnedChatIds(next)
+  }, [pinnedChatIds, recentRuns])
+
+  // Chats: pinned first, then the most recently modified, 10 rows total.
+  const recentChats = React.useMemo(() => {
+    const chatRecency = (r: { createdAt: string; modifiedAt?: string }) => {
+      const ms = new Date(r.modifiedAt ?? r.createdAt).getTime()
+      return Number.isFinite(ms) ? ms : 0
+    }
+    const sorted = [...recentRuns].sort((a, b) => chatRecency(b) - chatRecency(a))
+    const pinned = sorted.filter((r) => pinnedChatIds.includes(r.id))
+    const rest = sorted.filter((r) => !pinnedChatIds.includes(r.id))
+    return [...pinned, ...rest.slice(0, Math.max(0, 10 - pinned.length))]
+  }, [recentRuns, pinnedChatIds])
+
+  // Apps pinned to the sidebar (right-click an app card in the Apps view).
+  // Names resolve via apps:list; until then rows show the folder slug, and
+  // pins whose app no longer exists are hidden (but kept in storage).
+  const [pinnedAppFolders, setPinnedAppFolders] = useState<string[]>(() => getPinnedApps())
+  const [pinnedAppNames, setPinnedAppNames] = useState<Map<string, string> | null>(null)
+  useEffect(() => onPinnedAppsChanged(setPinnedAppFolders), [])
+  useEffect(() => {
+    if (pinnedAppFolders.length === 0) return
+    let cancelled = false
+    void window.ipc.invoke('apps:list', {})
+      .then((r) => {
+        if (cancelled) return
+        setPinnedAppNames(new Map(r.apps.map((a) => [a.folder, a.manifest?.name ?? a.folder])))
+      })
+      .catch(() => { /* fall back to folder names */ })
+    return () => { cancelled = true }
+  }, [pinnedAppFolders])
+  const pinnedApps = pinnedAppFolders
+    .filter((f) => pinnedAppNames === null || pinnedAppNames.has(f))
+    .map((f) => ({ folder: f, name: pinnedAppNames?.get(f) ?? f }))
+
+  // Chat pending delete confirmation, if any.
+  const [deleteChatTarget, setDeleteChatTarget] = useState<{ id: string; title: string } | null>(null)
+
+  // Inline chat rename: which row is editing and its draft text.
+  const [renamingChatId, setRenamingChatId] = useState<string | null>(null)
+  const [renameDraft, setRenameDraft] = useState('')
+  const commitChatRename = useCallback((chatId: string) => {
+    const title = renameDraft.trim()
+    const current = recentChats.find((c) => c.id === chatId)
+    setRenamingChatId(null)
+    if (!title || title === (current?.title ?? '')) return
+    onRenameRun?.(chatId, title)
+  }, [renameDraft, recentChats, onRenameRun])
+
+  // Workspace count for the Workspaces sublabel — top-level dir children of
+  // knowledge/Workspace (matches WorkspaceView's root listing).
+  const workspaceCount = React.useMemo(() => {
+    const find = (nodes: TreeNode[]): TreeNode | null => {
+      for (const n of nodes) {
+        if (n.path === 'knowledge/Workspace') return n
+        if (n.kind === 'dir' && n.children?.length) {
+          const found = find(n.children)
+          if (found) return found
+        }
+      }
+      return null
+    }
+    const node = find(tree)
+    return node?.children?.filter((c) => c.kind === 'dir').length ?? 0
+  }, [tree])
+
+  // "Updated 4m ago" sublabel under Knowledge, based on the most recently
+  // modified note. Recomputed in an effect (not during render) and ticked so
+  // the relative time stays fresh.
+  const latestNoteMtime = recentNotes[0]?.stat?.mtimeMs ?? null
+  const [knowledgeUpdatedLabel, setKnowledgeUpdatedLabel] = useState<string | null>(null)
+  useEffect(() => {
+    if (!latestNoteMtime) { setKnowledgeUpdatedLabel(null); return }
+    const update = () => setKnowledgeUpdatedLabel(`Updated ${formatAgo(latestNoteMtime)}`)
+    update()
+    const tick = setInterval(update, 60 * 1000)
+    return () => clearInterval(tick)
+  }, [latestNoteMtime])
+
+  // "2 active · Last run 3m ago" sublabel under Background agents, overridden by
+  // "N failed · Needs review" when any task's last run errored.
+  const [bgAgentsLabel, setBgAgentsLabel] = useState<string | null>(null)
+  useEffect(() => {
+    const update = () => {
+      const failed = bgTaskSummaries.filter((t) => t.lastRunError).length
+      if (failed > 0) {
+        setBgAgentsLabel(`${failed} failed · Needs review`)
+        return
+      }
+      const active = bgTaskSummaries.filter((t) => t.active).length
+      const lastRunMs = bgTaskSummaries.reduce((max, t) => {
+        const ms = t.lastRunAt ? new Date(t.lastRunAt).getTime() : 0
+        return Number.isFinite(ms) && ms > max ? ms : max
+      }, 0)
+      const parts: string[] = [active > 0 ? `${active} active` : 'No active agents']
+      if (lastRunMs > 0) parts.push(`Last run ${formatAgo(lastRunMs)}`)
+      setBgAgentsLabel(parts.join(' · '))
+    }
+    update()
+    const tick = setInterval(update, 60 * 1000)
+    return () => clearInterval(tick)
+  }, [bgTaskSummaries])
 
   const handleRowboatLogin = useCallback(async () => {
     try {
@@ -537,12 +753,6 @@ export function SidebarContentPanel({
             setShowOauthAlert(true)
           }
         }
-        if (connected && mounted) {
-          try {
-            const account = await window.ipc.invoke('account:getRowboat', null)
-            if (mounted) setAppUrl(account.config?.appUrl ?? null)
-          } catch { /* ignore */ }
-        }
       } catch (error) {
         console.error('Failed to fetch OAuth state:', error)
         if (mounted) {
@@ -565,198 +775,548 @@ export function SidebarContentPanel({
     }
   }, [])
 
+  // Re-anchor the warning whenever billing (re)loads — billing is authoritative.
+  useEffect(() => {
+    if (billing) {
+      const next = isOutOfCredits(billing)
+      outOfCreditsRef.current = next
+      setOutOfCredits(next)
+    }
+  }, [billing])
+
+  // Live signals: a usage API error flips it on; a successful cost-incurring
+  // call flips it off and triggers a single billing refresh to reconcile.
+  useEffect(() => {
+    const onExhausted = () => {
+      outOfCreditsRef.current = true
+      setOutOfCredits(true)
+    }
+    const onReplenished = () => {
+      const wasOut = outOfCreditsRef.current
+      outOfCreditsRef.current = false
+      setOutOfCredits(false)
+      if (wasOut) void refreshBilling()
+    }
+    window.addEventListener(CREDIT_EXHAUSTED_EVENT, onExhausted)
+    window.addEventListener(CREDIT_REPLENISHED_EVENT, onReplenished)
+    return () => {
+      window.removeEventListener(CREDIT_EXHAUSTED_EVENT, onExhausted)
+      window.removeEventListener(CREDIT_REPLENISHED_EVENT, onReplenished)
+    }
+  }, [refreshBilling])
+
+  // Auto-open the popover the first time we go out of credits; reset when
+  // credits return so it can auto-open again on a future episode.
+  useEffect(() => {
+    if (outOfCredits) {
+      if (!creditPopoverAutoShownRef.current) {
+        creditPopoverAutoShownRef.current = true
+        setCreditPopoverOpen(true)
+      }
+    } else {
+      creditPopoverAutoShownRef.current = false
+      setCreditPopoverOpen(false)
+    }
+  }, [outOfCredits])
+
+  // Single preview shown as a sublabel on the Email / Meetings nav buttons.
+  const previewEmail = emailThreads[0]
+  const previewMeeting = meetings[0]
+  // Drive the recording indicator off the global recording state — there is only
+  // one active recording, so it must show even for ad-hoc recordings or meetings
+  // that aren't the upcoming one previewed here.
+  const meetingIsRecording = meetingRecordingState === 'recording'
+    || meetingRecordingState === 'connecting'
+    || meetingRecordingState === 'stopping'
+  const meetingIsBusy = meetingRecordingState === 'connecting' || meetingRecordingState === 'stopping'
+  // Title of the meeting being recorded, when it's the upcoming one we preview.
+  const recordingMeeting = previewMeeting != null && recordingMeetingSource === previewMeeting.source
+    ? previewMeeting
+    : null
+  const meetingSublabel = meetingIsRecording
+    ? (recordingMeeting?.summary ?? 'Recording…')
+    : (previewMeeting ? `${previewMeeting.summary} · ${formatMeetingTime(previewMeeting)}` : null)
+
   return (
     <Sidebar className="rowboat-sidebar border-r-0" {...props}>
-      <SidebarHeader className="titlebar-drag-region">
-        {/* Top spacer to clear the traffic lights + fixed toggle row */}
+      <SidebarHeader className="titlebar-drag-region gap-0 pb-0">
+        {/* Just clears the traffic lights + fixed toggle row (voice note and
+            compose live up there now); nav starts right below. */}
         <div className="h-8" />
-        {/* Tab switcher - centered below the traffic lights row */}
-        <div className="flex items-center px-2 py-1.5">
-          <div className="rowboat-section-switcher titlebar-no-drag flex w-full rounded-lg bg-sidebar-accent/50 p-0.5">
-            {sectionTabs.map((tab) => (
-              <button
-                key={tab.id}
-                onClick={() => setActiveSection(tab.id)}
-                className={cn(
-                  "flex-1 rounded-md px-3 py-1 text-sm font-medium transition-colors",
-                  activeSection === tab.id
-                    ? "bg-sidebar-accent text-sidebar-accent-foreground shadow-sm"
-                    : "text-sidebar-foreground/70 hover:text-sidebar-foreground"
-                )}
-              >
-                {tab.label}
-              </button>
-            ))}
-          </div>
-        </div>
-        {/* Quick action buttons */}
-        <div className="rowboat-quick-actions titlebar-no-drag flex flex-col gap-0.5 px-2 pb-1">
-          {onNewChat && (
-            <button
-              type="button"
-              onClick={onNewChat}
-              className="flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-sm text-sidebar-foreground/80 hover:bg-sidebar-accent hover:text-sidebar-accent-foreground transition-colors"
-            >
-              <SquarePen className="size-4" />
-              <span>New chat</span>
-            </button>
-          )}
-          {onOpenSearch && (
-            <button
-              type="button"
-              onClick={onOpenSearch}
-              className={cn(
-                "flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-sm transition-colors",
-                isSearchOpen
-                  ? "bg-sidebar-accent text-sidebar-accent-foreground"
-                  : "text-sidebar-foreground/80 hover:bg-sidebar-accent hover:text-sidebar-accent-foreground"
-              )}
-            >
-              <SearchIcon className="size-4" />
-              <span>Search</span>
-            </button>
-          )}
-          {onToggleBrowser && (
-            <button
-              type="button"
-              onClick={onToggleBrowser}
-              className={cn(
-                "flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-sm transition-colors",
-                isBrowserQuickActionSelected
-                  ? "bg-sidebar-accent text-sidebar-accent-foreground"
-                  : "text-sidebar-foreground/80 hover:bg-sidebar-accent hover:text-sidebar-accent-foreground"
-              )}
-            >
-              <Globe className="size-4" />
-              <span>Run browser task</span>
-            </button>
-          )}
-          {onOpenSuggestedTopics && (
-            <button
-              type="button"
-              onClick={onOpenSuggestedTopics}
-              className={cn(
-                "flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-sm transition-colors",
-                isSuggestedTopicsQuickActionSelected
-                  ? "bg-sidebar-accent text-sidebar-accent-foreground"
-                  : "text-sidebar-foreground/80 hover:bg-sidebar-accent hover:text-sidebar-accent-foreground"
-              )}
-            >
-              <Lightbulb className="size-4" />
-              <span>Suggested Topics</span>
-            </button>
-          )}
-          {onOpenBgTasks && (
-            <button
-              type="button"
-              onClick={onOpenBgTasks}
-              className={cn(
-                "flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-sm transition-colors",
-                isBgTasksQuickActionSelected
-                  ? "bg-sidebar-accent text-sidebar-accent-foreground"
-                  : "text-sidebar-foreground/80 hover:bg-sidebar-accent hover:text-sidebar-accent-foreground"
-              )}
-            >
-              <ListChecks className="size-4" />
-              <span>Background tasks</span>
-            </button>
-          )}
-          {onOpenEmail && (
-            <button
-              type="button"
-              onClick={onOpenEmail}
-              className={cn(
-                "flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-sm transition-colors",
-                isEmailQuickActionSelected
-                  ? "bg-sidebar-accent text-sidebar-accent-foreground"
-                  : "text-sidebar-foreground/80 hover:bg-sidebar-accent hover:text-sidebar-accent-foreground"
-              )}
-            >
-              <Mail className="size-4" />
-              <span>Email</span>
-            </button>
-          )}
-          {onOpenMeetings && (
-            <button
-              type="button"
-              onClick={onOpenMeetings}
-              className={cn(
-                "flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-sm transition-colors",
-                isMeetingsQuickActionSelected
-                  ? "bg-sidebar-accent text-sidebar-accent-foreground"
-                  : "text-sidebar-foreground/80 hover:bg-sidebar-accent hover:text-sidebar-accent-foreground"
-              )}
-            >
-              <Mic className="size-4" />
-              <span>Meetings</span>
-            </button>
-          )}
-          {onOpenLiveNotes && (
-            <button
-              type="button"
-              onClick={onOpenLiveNotes}
-              className={cn(
-                "flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-sm transition-colors",
-                isLiveNotesQuickActionSelected
-                  ? "bg-sidebar-accent text-sidebar-accent-foreground"
-                  : "text-sidebar-foreground/80 hover:bg-sidebar-accent hover:text-sidebar-accent-foreground"
-              )}
-            >
-              <Radio className="size-4" />
-              <span>Live notes</span>
-            </button>
-          )}
-        </div>
       </SidebarHeader>
-      <SidebarContent>
-        {activeSection === "knowledge" && (
-          <KnowledgeSection
-            tree={tree}
-            selectedPath={selectedPath}
-            expandedPaths={expandedPaths}
-            onSelectFile={onSelectFile}
-            onToggleFolder={onToggleFolder}
-            actions={knowledgeActions}
-            onVoiceNoteCreated={onVoiceNoteCreated}
-          />
+      <SidebarContent className="gap-0">
+        {/* Ordered to mirror the dock: Assistant, Spaces, then the
+            destinations, then Chats. Same glyphs as the dock tiles. */}
+        <SidebarGroup className="flex flex-col pb-0">
+          <SidebarGroupContent>
+            <SidebarMenu>
+              <SidebarMenuItem>
+                <SidebarMenuButton
+                  isActive={activeNav === 'assistant'}
+                  onClick={() => {
+                    if (lastChat && onOpenRun) onOpenRun(lastChat.id)
+                    else onNewChat?.()
+                  }}
+                >
+                  <MascotFaceIcon className="size-4 shrink-0" />
+                  <span className="flex-1 truncate">Assistant</span>
+                </SidebarMenuButton>
+              </SidebarMenuItem>
+            </SidebarMenu>
+          </SidebarGroupContent>
+        </SidebarGroup>
+
+        {/* Spaces — orgs and their spaces, with unread counts */}
+        {SPACES_ENABLED && (
+          <>
+            <SpacesSidebarSection activeSpace={activeSpace} onOpenSpace={(orgId, spaceId) => onOpenSpace?.(orgId, spaceId)} />
+            <div className="mx-3 my-2 border-t border-border" />
+          </>
         )}
-        {activeSection === "tasks" && (
-          <TasksSection
-            runs={runs}
-            currentRunId={currentRunId}
-            processingRunIds={processingRunIds}
-            actions={tasksActions}
-            backgroundTasks={backgroundTasks}
-            selectedBackgroundTask={selectedBackgroundTask}
-          />
-        )}
-      </SidebarContent>
-      {/* Billing / upgrade CTA or Log in CTA */}
-      {isRowboatConnected && billing ? (
-        <div className="px-3 py-2">
-          <div className="flex items-center justify-between rounded-lg border border-sidebar-border bg-sidebar-accent/20 px-3 py-2">
-            <div className="min-w-0">
-              <span className="text-xs font-medium capitalize text-sidebar-foreground">
-                {billing.subscriptionPlan ? `${billing.subscriptionPlan} plan` : 'No plan'}
-              </span>
-              {billing.subscriptionStatus === 'trialing' && billing.trialExpiresAt && (() => {
-                const days = Math.max(0, Math.ceil((new Date(billing.trialExpiresAt).getTime() - Date.now()) / (1000 * 60 * 60 * 24)))
-                return (
-                  <p className="text-[10px] text-sidebar-foreground/60">
-                    {days === 0 ? 'Trial expires today' : days === 1 ? '1 day left' : `${days} days left`}
-                  </p>
-                )
-              })()}
-            </div>
+
+        {/* Primary navigation */}
+        <SidebarGroup className="flex flex-col">
+          <SidebarGroupContent>
+            <SidebarMenu>
+              <SidebarMenuItem>
+                <SidebarMenuButton data-tour-id="nav-home" isActive={activeNav === 'home'} onClick={onOpenHome}>
+                  <Home className="size-4 shrink-0" />
+                  <span className="flex-1 truncate">Home</span>
+                </SidebarMenuButton>
+              </SidebarMenuItem>
+              <SidebarMenuItem>
+                <SidebarMenuButton
+                  data-tour-id="nav-email"
+                  isActive={activeNav === 'email'}
+                  onClick={() => onOpenEmail?.()}
+                  className={previewEmail ? 'h-auto items-start py-1' : undefined}
+                >
+                  <Mail className={cn('size-4 shrink-0', previewEmail && 'mt-0.5')} />
+                  <div className="flex min-w-0 flex-1 flex-col">
+                    <span className="truncate">Email</span>
+                    {previewEmail && (
+                      <span className="truncate text-[11px] text-muted-foreground">
+                        {formatEmailFrom(previewEmail.from)} · {previewEmail.subject}
+                      </span>
+                    )}
+                  </div>
+                  {unreadEmailCount > 0 && (
+                    <span className="shrink-0 self-center rounded-full bg-sidebar-accent px-1.5 text-[10px] font-medium text-sidebar-accent-foreground tabular-nums">
+                      {unreadEmailCount}
+                    </span>
+                  )}
+                </SidebarMenuButton>
+              </SidebarMenuItem>
+              {codeModeEnabled && (
+                <SidebarMenuItem>
+                  <SidebarMenuButton data-tour-id="nav-code" isActive={activeNav === 'code'} onClick={onOpenCode}>
+                    <Code2 className="size-4 shrink-0" />
+                    <span className="flex-1 truncate">Code</span>
+                  </SidebarMenuButton>
+                </SidebarMenuItem>
+              )}
+              <SidebarMenuItem>
+                <SidebarMenuButton
+                  data-tour-id="nav-meetings"
+                  isActive={activeNav === 'meetings'}
+                  onClick={onOpenMeetings}
+                  className={meetingSublabel ? 'h-auto items-start py-1' : undefined}
+                >
+                  <Mic className={cn('size-4 shrink-0', meetingSublabel && 'mt-1', meetingIsRecording && 'text-red-500')} />
+                  <div className="flex min-w-0 flex-1 flex-col">
+                    <span className="truncate">Meetings</span>
+                    {meetingSublabel && (
+                      <span className={cn(
+                        'truncate text-[11px]',
+                        meetingIsRecording ? 'text-red-500' : 'text-muted-foreground',
+                      )}>
+                        {meetingSublabel}
+                      </span>
+                    )}
+                  </div>
+                </SidebarMenuButton>
+                {meetingIsRecording ? (
+                  <div className="absolute inset-y-0 right-1 flex items-center gap-1.5">
+                    <span className="relative flex size-2">
+                      <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-red-500 opacity-75" />
+                      <span className="relative inline-flex size-2 rounded-full bg-red-500" />
+                    </span>
+                    <Tooltip>
+                      <TooltipTrigger asChild>
+                        <button
+                          type="button"
+                          aria-label="Stop recording"
+                          disabled={meetingIsBusy}
+                          onClick={(e) => { e.stopPropagation(); onToggleMeetingRecording?.() }}
+                          onMouseDown={(e) => e.stopPropagation()}
+                          className="flex aspect-square w-5 items-center justify-center rounded-md text-destructive hover:bg-destructive/10 disabled:opacity-50"
+                        >
+                          {meetingIsBusy ? <LoaderIcon className="size-4 animate-spin" /> : <Square className="size-3.5 fill-current" />}
+                        </button>
+                      </TooltipTrigger>
+                      <TooltipContent side="bottom">
+                        {meetingRecordingState === 'connecting' ? 'Starting…' : meetingRecordingState === 'stopping' ? 'Stopping…' : 'Stop recording'}
+                      </TooltipContent>
+                    </Tooltip>
+                  </div>
+                ) : previewMeeting ? (
+                  <div className="absolute inset-y-0 right-1 flex items-center gap-0.5 opacity-0 transition-opacity group-focus-within/menu-item:opacity-100 group-hover/menu-item:opacity-100">
+                    <Tooltip>
+                      <TooltipTrigger asChild>
+                        <button
+                          type="button"
+                          aria-label="Take notes"
+                          onClick={(e) => { e.stopPropagation(); triggerMeetingCapture(previewMeeting, false) }}
+                          onMouseDown={(e) => e.stopPropagation()}
+                          className="flex aspect-square w-5 items-center justify-center rounded-md text-sidebar-foreground hover:bg-sidebar-accent hover:text-sidebar-accent-foreground"
+                        >
+                          <Mic className="size-4" />
+                        </button>
+                      </TooltipTrigger>
+                      <TooltipContent side="bottom">Take notes</TooltipContent>
+                    </Tooltip>
+                    {previewMeeting.conferenceLink && (
+                      <Tooltip>
+                        <TooltipTrigger asChild>
+                          <button
+                            type="button"
+                            aria-label="Join & take notes"
+                            onClick={(e) => { e.stopPropagation(); triggerMeetingCapture(previewMeeting, true) }}
+                            onMouseDown={(e) => e.stopPropagation()}
+                            className="flex aspect-square w-5 items-center justify-center rounded-md text-sidebar-foreground hover:bg-sidebar-accent hover:text-sidebar-accent-foreground"
+                          >
+                            <Video className="size-4" />
+                          </button>
+                        </TooltipTrigger>
+                        <TooltipContent side="bottom">Join & take notes</TooltipContent>
+                      </Tooltip>
+                    )}
+                  </div>
+                ) : null}
+              </SidebarMenuItem>
+              <SidebarMenuItem>
+                <SidebarMenuButton
+                  data-tour-id="nav-knowledge"
+                  isActive={activeNav === 'knowledge'}
+                  onClick={() => knowledgeActions.openKnowledgeView()}
+                  className={knowledgeUpdatedLabel ? 'h-auto items-start py-1' : undefined}
+                >
+                  <FileText className={cn('size-4 shrink-0', knowledgeUpdatedLabel && 'mt-0.5')} />
+                  <div className="flex min-w-0 flex-1 flex-col">
+                    <span className="truncate">Brain</span>
+                    {knowledgeUpdatedLabel && (
+                      <span className="truncate text-[11px] text-muted-foreground">{knowledgeUpdatedLabel}</span>
+                    )}
+                  </div>
+                </SidebarMenuButton>
+              </SidebarMenuItem>
+            </SidebarMenu>
+
+            <div className="mx-3 my-2 border-t border-border" />
+
+            <SidebarMenu>
+              <SidebarMenuItem>
+                <SidebarMenuButton
+                  data-tour-id="nav-apps"
+                  isActive={activeNav === 'apps'}
+                  onClick={onOpenApps}
+                >
+                  <LayoutGrid className="size-4 shrink-0" />
+                  <span className="flex-1 truncate">Apps</span>
+                </SidebarMenuButton>
+              </SidebarMenuItem>
+              {pinnedApps.map(({ folder, name }) => (
+                <SidebarMenuItem key={folder}>
+                  <ContextMenu>
+                    <ContextMenuTrigger asChild>
+                      <SidebarMenuButton onClick={() => onOpenApp?.(folder)} className="pl-7">
+                        <AppWindow className="size-4 shrink-0 text-muted-foreground" />
+                        <span className="flex-1 truncate">{name}</span>
+                      </SidebarMenuButton>
+                    </ContextMenuTrigger>
+                    <ContextMenuContent>
+                      <ContextMenuItem onClick={() => unpinApp(folder)}>
+                        <PanelLeftClose className="mr-2 size-3.5" />
+                        Remove from sidebar
+                      </ContextMenuItem>
+                    </ContextMenuContent>
+                  </ContextMenu>
+                </SidebarMenuItem>
+              ))}
+              <SidebarMenuItem>
+                <SidebarMenuButton
+                  data-tour-id="nav-agents"
+                  isActive={activeNav === 'agents'}
+                  onClick={onOpenBgTasks}
+                  className={bgAgentsLabel ? 'h-auto items-start py-1' : undefined}
+                >
+                  <Bot className={cn('size-4 shrink-0', bgAgentsLabel && 'mt-0.5')} />
+                  <div className="flex min-w-0 flex-1 flex-col">
+                    <span className="truncate">Background agents</span>
+                    {bgAgentsLabel && (
+                      <span className={cn(
+                        'truncate text-[11px]',
+                        bgTaskSummaries.some((t) => t.lastRunError) ? 'text-destructive' : 'text-muted-foreground',
+                      )}>
+                        {bgAgentsLabel}
+                      </span>
+                    )}
+                  </div>
+                </SidebarMenuButton>
+              </SidebarMenuItem>
+              <SidebarMenuItem>
+                <SidebarMenuButton
+                  data-tour-id="nav-workspaces"
+                  isActive={activeNav === 'workspaces'}
+                  onClick={() => knowledgeActions.openWorkspaceAt()}
+                  className="h-auto items-start py-1"
+                >
+                  <Folder className="mt-0.5 size-4 shrink-0" />
+                  <div className="flex min-w-0 flex-1 flex-col">
+                    <span className="truncate">Workspaces</span>
+                    <span className="truncate text-[11px] text-muted-foreground">
+                      {workspaceCount === 0 ? 'No workspaces' : `${workspaceCount} workspace${workspaceCount === 1 ? '' : 's'}`}
+                    </span>
+                  </div>
+                </SidebarMenuButton>
+              </SidebarMenuItem>
+              {onToggleBrowser && (
+                <SidebarMenuItem>
+                  <SidebarMenuButton onClick={onToggleBrowser}>
+                    <Globe className="size-4 shrink-0" />
+                    <span className="flex-1 truncate">Browser</span>
+                  </SidebarMenuButton>
+                </SidebarMenuItem>
+              )}
+            </SidebarMenu>
+          </SidebarGroupContent>
+        </SidebarGroup>
+
+        <div className="mx-3 my-2 border-t border-border" />
+
+        {/* Chats */}
+        <SidebarGroup className="flex flex-col">
+          <SidebarGroupContent>
             <button
-              onClick={() => appUrl && window.open(`${appUrl}?intent=upgrade`)}
-              className="shrink-0 rounded-md bg-sidebar-foreground/10 px-2.5 py-1 text-[11px] font-medium text-sidebar-foreground transition-colors hover:bg-sidebar-foreground/20"
+              type="button"
+              data-tour-id="nav-chats"
+              onClick={() => setChatsExpanded((v) => !v)}
+              className="flex w-full items-center gap-1.5 px-3 py-1 text-[13px] text-muted-foreground"
             >
-              {!billing.subscriptionPlan || billing.subscriptionPlan === 'free' || billing.subscriptionPlan === 'starter' ? 'Upgrade' : 'Manage'}
+              <ChevronRight className={cn('size-3 transition-transform', chatsExpanded && 'rotate-90')} />
+              <span className="flex-1 text-left">Chats</span>
             </button>
+            {chatsExpanded && (
+              recentChats.length === 0 ? (
+                <div className="px-4 pb-2 text-[11.5px] italic text-muted-foreground">
+                  Your recent chats show up here.
+                </div>
+              ) : (
+                <SidebarMenu>
+                  {recentChats.map((chat) => (
+                    <SidebarMenuItem key={chat.id}>
+                      {renamingChatId === chat.id ? (
+                        <div className="flex h-8 items-center gap-2 rounded-md px-2">
+                          <MessageSquare className="size-4 shrink-0 text-muted-foreground" />
+                          <input
+                            autoFocus
+                            value={renameDraft}
+                            onChange={(e) => setRenameDraft(e.target.value)}
+                            onKeyDown={(e) => {
+                              if (e.key === 'Enter') {
+                                e.preventDefault()
+                                commitChatRename(chat.id)
+                              } else if (e.key === 'Escape') {
+                                e.preventDefault()
+                                setRenamingChatId(null)
+                              }
+                            }}
+                            onBlur={() => commitChatRename(chat.id)}
+                            className="h-6 min-w-0 flex-1 rounded-sm border border-border bg-background px-1.5 text-sm outline-none focus:ring-1 focus:ring-ring"
+                          />
+                        </div>
+                      ) : (
+                        <>
+                          <SidebarMenuButton onClick={() => onOpenRun?.(chat.id)} className={onRenameRun ? 'pr-7' : undefined}>
+                            <MessageSquare className="size-4 shrink-0 text-muted-foreground" />
+                            <span className="flex-1 truncate">{chat.title || '(Untitled chat)'}</span>
+                            {pinnedChatIds.includes(chat.id) && (
+                              <Pin className="size-3 shrink-0 text-muted-foreground/70 transition-opacity group-hover/menu-item:opacity-0" />
+                            )}
+                          </SidebarMenuButton>
+                          {onRenameRun && (
+                            <DropdownMenu>
+                              <DropdownMenuTrigger asChild>
+                                <button
+                                  type="button"
+                                  aria-label="Chat options"
+                                  onClick={(e) => e.stopPropagation()}
+                                  className="absolute right-1.5 top-1/2 flex size-5 -translate-y-1/2 items-center justify-center rounded text-muted-foreground opacity-0 transition-opacity hover:text-foreground group-hover/menu-item:opacity-100 data-[state=open]:opacity-100"
+                                >
+                                  <MoreVertical className="size-4" />
+                                </button>
+                              </DropdownMenuTrigger>
+                              <DropdownMenuContent side="right" align="start">
+                                <DropdownMenuItem onClick={() => toggleChatPin(chat.id)}>
+                                  <Pin className="mr-2 size-3.5" />
+                                  {pinnedChatIds.includes(chat.id) ? 'Unpin' : 'Pin'}
+                                </DropdownMenuItem>
+                                <DropdownMenuItem
+                                  onClick={() => {
+                                    setRenameDraft(chat.title || '')
+                                    setRenamingChatId(chat.id)
+                                  }}
+                                >
+                                  <Pencil className="mr-2 size-3.5" />
+                                  Rename
+                                </DropdownMenuItem>
+                                {onDeleteRun && (
+                                  <DropdownMenuItem
+                                    className="text-destructive focus:text-destructive"
+                                    onClick={() => setDeleteChatTarget({ id: chat.id, title: chat.title || '(Untitled chat)' })}
+                                  >
+                                    <Trash2 className="mr-2 size-3.5" />
+                                    Delete
+                                  </DropdownMenuItem>
+                                )}
+                              </DropdownMenuContent>
+                            </DropdownMenu>
+                          )}
+                        </>
+                      )}
+                    </SidebarMenuItem>
+                  ))}
+                  {onOpenChatHistory && (
+                    <SidebarMenuItem>
+                      <SidebarMenuButton
+                        onClick={() => onOpenChatHistory()}
+                        className="text-muted-foreground"
+                      >
+                        <ArrowUpRight className="size-4 shrink-0 text-muted-foreground" />
+                        <span className="flex-1 truncate">View all</span>
+                      </SidebarMenuButton>
+                    </SidebarMenuItem>
+                  )}
+                </SidebarMenu>
+              )
+            )}
+          </SidebarGroupContent>
+        </SidebarGroup>
+        <AlertDialog open={!!deleteChatTarget} onOpenChange={(open) => { if (!open) setDeleteChatTarget(null) }}>
+          <AlertDialogContent>
+            <AlertDialogHeader>
+              <AlertDialogTitle>Delete chat?</AlertDialogTitle>
+              <AlertDialogDescription>
+                &ldquo;{deleteChatTarget?.title}&rdquo; and its full history will be permanently deleted.
+              </AlertDialogDescription>
+            </AlertDialogHeader>
+            <AlertDialogFooter>
+              <AlertDialogCancel>Cancel</AlertDialogCancel>
+              <AlertDialogAction
+                className="bg-destructive text-white hover:bg-destructive/90"
+                onClick={() => {
+                  if (deleteChatTarget) onDeleteRun?.(deleteChatTarget.id)
+                  setDeleteChatTarget(null)
+                }}
+              >
+                Delete
+              </AlertDialogAction>
+            </AlertDialogFooter>
+          </AlertDialogContent>
+        </AlertDialog>
+      </SidebarContent>
+      {/* First-time-action credit rewards (feature-flagged, signed-in only) */}
+      <SidebarCreditRewards
+        onOpenEmail={onOpenEmail}
+        onOpenMeetings={onOpenMeetings}
+        onOpenAgents={onOpenBgTasks}
+        onOpenApps={onOpenApps}
+        onConnectAccounts={() => setConnectionsSettingsOpen(true)}
+      />
+      {/* Billing / upgrade CTA or Log in CTA */}
+      {isRowboatConnected && billing ? (() => {
+        const upgradeLabel = !billing.subscriptionPlanId || currentBillingPlan?.category === 'free' || currentBillingPlan?.category === 'starter' ? 'Upgrade' : 'Manage'
+        if (outOfCredits) {
+          return (
+            <div className="px-3 py-2">
+              <Popover open={creditPopoverOpen} onOpenChange={setCreditPopoverOpen}>
+                <div className="flex items-center justify-between rounded-lg border border-red-500/50 bg-red-500/10 px-3 py-2">
+                  <PopoverTrigger asChild>
+                    <button type="button" className="flex min-w-0 flex-1 items-center gap-2 text-left">
+                      <AlertTriangle className="size-4 shrink-0 text-red-500" />
+                      <div className="min-w-0">
+                        <span className="text-xs font-medium capitalize text-sidebar-foreground">
+                          {currentBillingPlan?.displayName ?? (billing.subscriptionPlanId ? 'Unknown' : 'No plan')}
+                        </span>
+                        <p className="text-[10px] text-red-500">Out of credits</p>
+                      </div>
+                    </button>
+                  </PopoverTrigger>
+                  <button
+                    onClick={() => appUrl && window.open(`${appUrl}?intent=upgrade`)}
+                    className="shrink-0 rounded-md bg-sidebar-foreground/10 px-2.5 py-1 text-[11px] font-medium text-sidebar-foreground transition-colors hover:bg-sidebar-foreground/20"
+                  >
+                    {upgradeLabel}
+                  </button>
+                </div>
+                <PopoverContent side="top" align="start" sideOffset={10} className="w-72">
+                  <PopoverArrow className="fill-popover" />
+                  <div className="flex items-start justify-between gap-2">
+                    <div className="flex items-center gap-2">
+                      <span className="flex size-8 shrink-0 items-center justify-center rounded-md bg-red-500/15 text-red-500">
+                        <CircleAlert className="size-4" />
+                      </span>
+                      <h4 className="text-sm font-bold text-foreground">You&apos;ve run out of credits</h4>
+                    </div>
+                    <button
+                      type="button"
+                      aria-label="Close"
+                      onClick={() => setCreditPopoverOpen(false)}
+                      className="rounded-md p-0.5 text-muted-foreground hover:bg-accent hover:text-foreground"
+                    >
+                      <X className="size-4" />
+                    </button>
+                  </div>
+                  <p className="mt-2 text-xs text-muted-foreground">
+                    Upgrade your plan to continue using all features.
+                  </p>
+                  <button
+                    onClick={() => { appUrl && window.open(`${appUrl}?intent=upgrade`); setCreditPopoverOpen(false) }}
+                    className="mt-3 w-full rounded-md bg-red-500 px-3 py-1.5 text-xs font-medium text-white transition-colors hover:bg-red-600"
+                  >
+                    Upgrade now
+                  </button>
+                </PopoverContent>
+              </Popover>
+            </div>
+          )
+        }
+        return (
+          <div className="px-3 py-2">
+            <div className="flex items-center justify-between rounded-lg border border-sidebar-border bg-sidebar-accent/20 px-3 py-2">
+              <div className="min-w-0">
+                <span className="text-xs font-medium capitalize text-sidebar-foreground">
+                  {currentBillingPlan?.displayName ?? (billing.subscriptionPlanId ? 'Unknown' : 'No plan')}
+                </span>
+                {billing.subscriptionStatus === 'trialing' && billing.trialExpiresAt && (() => {
+                  const days = Math.max(0, Math.ceil((new Date(billing.trialExpiresAt).getTime() - Date.now()) / (1000 * 60 * 60 * 24)))
+                  return (
+                    <p className="text-[10px] text-sidebar-foreground/60">
+                      {days === 0 ? 'Trial expires today' : days === 1 ? '1 day left' : `${days} days left`}
+                    </p>
+                  )
+                })()}
+              </div>
+              <button
+                onClick={() => appUrl && window.open(`${appUrl}?intent=upgrade`)}
+                className="shrink-0 rounded-md bg-sidebar-foreground/10 px-2.5 py-1 text-[11px] font-medium text-sidebar-foreground transition-colors hover:bg-sidebar-foreground/20"
+              >
+                {upgradeLabel}
+              </button>
+            </div>
           </div>
-        </div>
-      ) : null}
+        )
+      })() : null}
       {/* Sign in CTA */}
       {!isRowboatConnected && (
         <div className="px-3 py-2">
@@ -770,18 +1330,17 @@ export function SidebarContentPanel({
         </div>
       )}
       {/* Bottom actions */}
-      <div className="border-t border-sidebar-border px-2 py-2">
+      <div className="border-t border-border px-2 py-2">
         <div className="flex flex-col gap-1">
           <div className="flex items-center gap-2">
-            <ConnectorsPopover open={connectorsOpen} onOpenChange={setConnectorsOpen} mode="unconnected">
-              <button
-                ref={connectorsButtonRef}
-                className="flex w-full items-center gap-2 rounded-md px-2 py-1 text-xs text-sidebar-foreground/70 hover:bg-sidebar-accent hover:text-sidebar-accent-foreground transition-colors"
-              >
-                <Plug className="size-4" />
-                <span>Connect Accounts</span>
-              </button>
-            </ConnectorsPopover>
+            <button
+              ref={connectorsButtonRef}
+              onClick={() => setConnectionsSettingsOpen(true)}
+              className="flex w-full items-center gap-2 rounded-md px-2 py-1 text-xs text-sidebar-foreground/70 hover:bg-sidebar-accent hover:text-sidebar-accent-foreground transition-colors"
+            >
+              <Plug className="size-4" />
+              <span>Connect Accounts</span>
+            </button>
             {hasOauthError && (
               <AlertDialog
                 open={showOauthAlert}
@@ -799,9 +1358,9 @@ export function SidebarContentPanel({
                 <AlertDialogContent
                   onCloseAutoFocus={(event) => {
                     event.preventDefault()
-                    if (openConnectorsAfterClose) {
-                      setOpenConnectorsAfterClose(false)
-                      setConnectorsOpen(true)
+                    if (openConnectionsAfterClose) {
+                      setOpenConnectionsAfterClose(false)
+                      setConnectionsSettingsOpen(true)
                     }
                     connectorsButtonRef.current?.focus()
                   }}
@@ -816,7 +1375,7 @@ export function SidebarContentPanel({
                   <AlertDialogFooter>
                     <AlertDialogCancel
                       onClick={() => {
-                        setOpenConnectorsAfterClose(false)
+                        setOpenConnectionsAfterClose(false)
                         setShowOauthAlert(false)
                       }}
                     >
@@ -824,7 +1383,7 @@ export function SidebarContentPanel({
                     </AlertDialogCancel>
                     <AlertDialogAction
                       onClick={() => {
-                        setOpenConnectorsAfterClose(true)
+                        setOpenConnectionsAfterClose(true)
                         setShowOauthAlert(false)
                       }}
                     >
@@ -835,907 +1394,139 @@ export function SidebarContentPanel({
               </AlertDialog>
             )}
           </div>
+          {onStartTour && (
+            <button
+              onClick={onStartTour}
+              className="flex w-full items-center gap-2 rounded-md px-2 py-1 text-xs text-sidebar-foreground/70 hover:bg-sidebar-accent hover:text-sidebar-accent-foreground transition-colors"
+            >
+              <MascotFaceIcon className="size-4" />
+              <span>Take a tour</span>
+            </button>
+          )}
           <SettingsDialog>
             <button className="flex w-full items-center gap-2 rounded-md px-2 py-1 text-xs text-sidebar-foreground/70 hover:bg-sidebar-accent hover:text-sidebar-accent-foreground transition-colors">
               <Settings className="size-4" />
               <span>Settings</span>
             </button>
           </SettingsDialog>
-          <HelpPopover>
-            <button className="flex w-full items-center gap-2 rounded-md px-2 py-1 text-xs text-sidebar-foreground/70 hover:bg-sidebar-accent hover:text-sidebar-accent-foreground transition-colors">
-              <HelpCircle className="size-4" />
-              <span>Help</span>
-            </button>
-          </HelpPopover>
         </div>
       </div>
+      <SettingsDialog
+        defaultTab="connections"
+        open={connectionsSettingsOpen}
+        onOpenChange={setConnectionsSettingsOpen}
+      />
       <SyncStatusBar />
       <SidebarRail />
     </Sidebar>
   )
 }
 
-async function transcribeWithDeepgram(audioBlob: Blob): Promise<string | null> {
-  try {
-    const configResult = await window.ipc.invoke('workspace:readFile', {
-      path: 'config/deepgram.json',
-      encoding: 'utf8',
-    })
-    const { apiKey } = JSON.parse(configResult.data) as { apiKey: string }
-    if (!apiKey) throw new Error('No apiKey in deepgram.json')
+type UpcomingMeeting = {
+  id: string
+  summary: string
+  start: Date
+  isAllDay: boolean
+  location: string | null
+  htmlLink: string | null
+  conferenceLink: string | null
+  source: string
+  rawStart: { dateTime?: string; date?: string } | undefined
+  rawEnd: { dateTime?: string; date?: string } | undefined
+}
 
-    const response = await fetch(
-      'https://api.deepgram.com/v1/listen?model=nova-2&smart_format=true',
-      {
-        method: 'POST',
-        headers: {
-          Authorization: `Token ${apiKey}`,
-          'Content-Type': audioBlob.type,
-        },
-        body: audioBlob,
-      },
-    )
+type RawCalendarEvent = {
+  id?: string
+  summary?: string
+  start?: { dateTime?: string; date?: string }
+  end?: { dateTime?: string; date?: string }
+  location?: string
+  htmlLink?: string
+  status?: string
+  attendees?: Array<{ self?: boolean; responseStatus?: string }>
+}
 
-    if (!response.ok) throw new Error(`Deepgram API error: ${response.status}`)
-    const result = await response.json()
-    return result.results?.channels?.[0]?.alternatives?.[0]?.transcript ?? null
-  } catch (err) {
-    console.error('Deepgram transcription failed:', err)
-    return null
+function parseAllDayDate(s: string): Date | null {
+  const m = /^(\d{4})-(\d{2})-(\d{2})/.exec(s)
+  if (!m) return null
+  return new Date(Number(m[1]), Number(m[2]) - 1, Number(m[3]))
+}
+
+function normalizeUpcomingMeeting(raw: RawCalendarEvent, sourcePath: string): UpcomingMeeting | null {
+  if (raw.status === 'cancelled') return null
+  const declined = raw.attendees?.find((a) => a.self)?.responseStatus === 'declined'
+  if (declined) return null
+  const allDayStart = raw.start?.date
+  const timedStart = raw.start?.dateTime
+  const isAllDay = !timedStart && Boolean(allDayStart)
+  let start: Date | null = null
+  let end: Date | null = null
+  if (timedStart) {
+    start = new Date(timedStart)
+    end = raw.end?.dateTime ? new Date(raw.end.dateTime) : null
+  } else if (allDayStart) {
+    start = parseAllDayDate(allDayStart)
+    end = raw.end?.date ? parseAllDayDate(raw.end.date) : null
+  }
+  if (!start || Number.isNaN(start.getTime())) return null
+  const now = new Date()
+  const effectiveEnd = end ?? (isAllDay ? new Date(start.getTime() + 24 * 60 * 60 * 1000) : start)
+  if (effectiveEnd <= now) return null
+  const conferenceLink = extractConferenceLink(raw as unknown as Record<string, unknown>) ?? null
+  return {
+    id: raw.id ?? sourcePath,
+    summary: raw.summary?.trim() || '(No title)',
+    start,
+    isAllDay,
+    location: raw.location?.trim() || null,
+    htmlLink: raw.htmlLink ?? null,
+    conferenceLink,
+    source: sourcePath,
+    rawStart: raw.start,
+    rawEnd: raw.end,
   }
 }
 
-// Voice Note Recording Button
-function VoiceNoteButton({ onNoteCreated }: { onNoteCreated?: (path: string) => void }) {
-  const [isRecording, setIsRecording] = React.useState(false)
-  const [hasDeepgramKey, setHasDeepgramKey] = React.useState(false)
-  const mediaRecorderRef = React.useRef<MediaRecorder | null>(null)
-  const chunksRef = React.useRef<Blob[]>([])
-  const notePathRef = React.useRef<string | null>(null)
-  const timestampRef = React.useRef<string | null>(null)
-  const relativePathRef = React.useRef<string | null>(null)
-  // Keep a ref to always call the latest onNoteCreated (avoids stale closure in recorder.onstop)
-  const onNoteCreatedRef = React.useRef(onNoteCreated)
-  React.useEffect(() => { onNoteCreatedRef.current = onNoteCreated }, [onNoteCreated])
-
-  React.useEffect(() => {
-    window.ipc.invoke('workspace:readFile', {
-      path: 'config/deepgram.json',
-      encoding: 'utf8',
-    }).then((result: { data: string }) => {
-      const { apiKey } = JSON.parse(result.data) as { apiKey: string }
-      setHasDeepgramKey(!!apiKey)
-    }).catch(() => {
-      setHasDeepgramKey(false)
-    })
-  }, [])
-
-  const startRecording = async () => {
-    try {
-      // Generate timestamp and paths immediately
-      const now = new Date()
-      const timestamp = now.toISOString().replace(/[:.]/g, '-')
-      const dateStr = now.toISOString().split('T')[0] // YYYY-MM-DD
-      const noteName = `voice-memo-${timestamp}`
-      const notePath = `knowledge/Voice Memos/${dateStr}/${noteName}.md`
-
-      timestampRef.current = timestamp
-      notePathRef.current = notePath
-      // Relative path for linking (from knowledge/ root, without .md extension)
-      const relativePath = `Voice Memos/${dateStr}/${noteName}`
-      relativePathRef.current = relativePath
-
-      // Create the note immediately with a "Recording..." placeholder
-      await window.ipc.invoke('workspace:mkdir', {
-        path: `knowledge/Voice Memos/${dateStr}`,
-        recursive: true,
-      })
-
-      const initialContent = `---
-type: voice memo
-recorded: "${now.toISOString()}"
-path: ${relativePath}
----
-# Voice Memo
-
-## Transcript
-
-*Recording in progress...*
-`
-      await window.ipc.invoke('workspace:writeFile', {
-        path: notePath,
-        data: initialContent,
-        opts: { encoding: 'utf8' },
-      })
-
-      // Select the note so the user can see it
-      onNoteCreatedRef.current?.(notePath)
-
-      // Start actual recording
-      const stream = await navigator.mediaDevices.getUserMedia({ audio: true })
-      const mimeType = MediaRecorder.isTypeSupported('audio/mp4')
-        ? 'audio/mp4'
-        : 'audio/webm'
-      const recorder = new MediaRecorder(stream, { mimeType })
-      chunksRef.current = []
-
-      recorder.ondataavailable = (e) => {
-        if (e.data.size > 0) chunksRef.current.push(e.data)
-      }
-
-      recorder.onstop = async () => {
-        stream.getTracks().forEach((t) => t.stop())
-        const blob = new Blob(chunksRef.current, { type: mimeType })
-        const ext = mimeType === 'audio/mp4' ? 'm4a' : 'webm'
-        const audioFilename = `voice-memo-${timestampRef.current}.${ext}`
-
-        // Save audio file to voice_memos folder (for backup/reference)
-        try {
-          await window.ipc.invoke('workspace:mkdir', {
-            path: 'voice_memos',
-            recursive: true,
-          })
-
-          const arrayBuffer = await blob.arrayBuffer()
-          const base64 = btoa(
-            new Uint8Array(arrayBuffer).reduce(
-              (data, byte) => data + String.fromCharCode(byte),
-              '',
-            ),
-          )
-
-          await window.ipc.invoke('workspace:writeFile', {
-            path: `voice_memos/${audioFilename}`,
-            data: base64,
-            opts: { encoding: 'base64' },
-          })
-        } catch {
-          console.error('Failed to save audio file')
-        }
-
-        // Update note to show transcribing status
-        const currentNotePath = notePathRef.current
-        const currentRelativePath = relativePathRef.current
-        if (currentNotePath && currentRelativePath) {
-          const transcribingContent = `---
-type: voice memo
-recorded: "${new Date().toISOString()}"
-path: ${currentRelativePath}
----
-# Voice Memo
-
-## Transcript
-
-*Transcribing...*
-`
-          await window.ipc.invoke('workspace:writeFile', {
-            path: currentNotePath,
-            data: transcribingContent,
-            opts: { encoding: 'utf8' },
-          })
-        }
-
-        // Transcribe and update the note with the transcript
-        const transcript = await transcribeWithDeepgram(blob)
-        if (currentNotePath && currentRelativePath) {
-          const finalContent = transcript
-            ? `---
-type: voice memo
-recorded: "${new Date().toISOString()}"
-path: ${currentRelativePath}
----
-# Voice Memo
-
-## Transcript
-
-${transcript}
-`
-            : `---
-type: voice memo
-recorded: "${new Date().toISOString()}"
-path: ${currentRelativePath}
----
-# Voice Memo
-
-## Transcript
-
-*Transcription failed. Please try again.*
-`
-          await window.ipc.invoke('workspace:writeFile', {
-            path: currentNotePath,
-            data: finalContent,
-            opts: { encoding: 'utf8' },
-          })
-
-          // Re-select to trigger refresh
-          onNoteCreatedRef.current?.(currentNotePath)
-
-          if (transcript) {
-            toast('Voice note transcribed', 'success')
-          } else {
-            toast('Transcription failed', 'error')
-          }
-        }
-      }
-
-      recorder.start()
-      mediaRecorderRef.current = recorder
-      setIsRecording(true)
-      toast('Recording started', 'success')
-    } catch {
-      toast('Could not access microphone', 'error')
-    }
-  }
-
-  const stopRecording = () => {
-    if (mediaRecorderRef.current && mediaRecorderRef.current.state !== 'inactive') {
-      mediaRecorderRef.current.stop()
-    }
-    mediaRecorderRef.current = null
-    setIsRecording(false)
-  }
-
-  if (!hasDeepgramKey) return null
-
-  return (
-    <Tooltip>
-      <TooltipTrigger asChild>
-        <button
-          onClick={isRecording ? stopRecording : startRecording}
-          className="text-sidebar-foreground/70 hover:text-sidebar-foreground hover:bg-sidebar-accent rounded p-1.5 transition-colors"
-        >
-          {isRecording ? (
-            <Square className="size-4 fill-red-500 text-red-500 animate-pulse" />
-          ) : (
-            <Mic className="size-4" />
-          )}
-        </button>
-      </TooltipTrigger>
-      <TooltipContent side="bottom">
-        {isRecording ? 'Stop Recording' : 'New Voice Note'}
-      </TooltipContent>
-    </Tooltip>
-  )
+function isSameLocalDay(a: Date, b: Date): boolean {
+  return a.getFullYear() === b.getFullYear() && a.getMonth() === b.getMonth() && a.getDate() === b.getDate()
 }
 
-// Knowledge Section
-function KnowledgeSection({
-  tree,
-  selectedPath,
-  expandedPaths,
-  onSelectFile,
-  onToggleFolder,
-  actions,
-  onVoiceNoteCreated,
-}: {
-  tree: TreeNode[]
-  selectedPath: string | null
-  expandedPaths: Set<string>
-  onSelectFile: (path: string, kind: "file" | "dir") => void
-  onToggleFolder?: (path: string) => void
-  actions: KnowledgeActions
-  onVoiceNoteCreated?: (path: string) => void
-}) {
-  const isExpanded = expandedPaths.size > 0
-  const treeContainerRef = React.useRef<HTMLDivElement | null>(null)
-  const [selectedFolderPath, setSelectedFolderPath] = useState<string | null>(null)
-  const [renameTarget, setRenameTarget] = useState<string | null>(null)
-  const visibleTree = React.useMemo(
-    () => tree.filter((item) => item.path !== 'knowledge/Meetings'),
-    [tree],
-  )
-
-  useEffect(() => {
-    if (!selectedPath) return
-
-    let cancelled = false
-    let rafId: number | null = null
-    let attempts = 0
-    const maxAttempts = 20
-
-    const revealActiveFile = () => {
-      if (cancelled) return
-      const container = treeContainerRef.current
-      if (!container) return
-      const activeRow = container.querySelector<HTMLElement>('[data-knowledge-active="true"]')
-      if (activeRow) {
-        activeRow.scrollIntoView({ block: "nearest", inline: "nearest" })
-        return
-      }
-      if (attempts >= maxAttempts) return
-      attempts += 1
-      rafId = requestAnimationFrame(revealActiveFile)
-    }
-
-    rafId = requestAnimationFrame(revealActiveFile)
-    return () => {
-      cancelled = true
-      if (rafId !== null) cancelAnimationFrame(rafId)
-    }
-  }, [selectedPath, expandedPaths, visibleTree])
-
-  // Folder clicks highlight the folder; file clicks clear folder highlight
-  const handleSelect = React.useCallback((path: string, kind: "file" | "dir") => {
-    if (kind === 'dir') {
-      setSelectedFolderPath(path)
-    } else {
-      setSelectedFolderPath(null)
-    }
-    onSelectFile(path, kind)
-  }, [onSelectFile])
-
-  // Resolve the parent path for new items: explicit folder > open file's parent > root
-  const deriveParent = React.useCallback((): string => {
-    if (selectedFolderPath) return selectedFolderPath
-    if (selectedPath) {
-      const parts = selectedPath.split('/')
-      if (parts.length > 1) return parts.slice(0, -1).join('/')
-    }
-    return 'knowledge'
-  }, [selectedFolderPath, selectedPath])
-
-  // Wrap actions to inject context-aware parent and capture rename target
-  const wrappedActions = React.useMemo<KnowledgeActions>(() => ({
-    ...actions,
-    createNote: (parentPath?: string) => actions.createNote(parentPath ?? deriveParent()),
-    createFolder: async (parentPath?: string): Promise<string> => {
-      const newPath = await actions.createFolder(parentPath ?? deriveParent())
-      setRenameTarget(newPath)
-      return newPath
-    },
-  }), [actions, deriveParent])
-
-  const fileManagerName = getFileManagerName()
-  const quickActions = [
-    { icon: FilePlus, label: "New Note", action: () => wrappedActions.createNote() },
-    { icon: FolderPlus, label: "New Folder", action: () => void wrappedActions.createFolder() },
-    { icon: Network, label: "Graph View", action: () => actions.openGraph() },
-    { icon: Table2, label: "Bases", action: () => actions.openBases() },
-    { icon: FolderOpen, label: `Open in ${fileManagerName}`, action: () => actions.revealInFileManager('knowledge', true) },
-  ]
-
-  return (
-    <ContextMenu>
-      <ContextMenuTrigger asChild>
-        <SidebarGroup className="flex-1 flex flex-col overflow-hidden">
-          <div className="flex items-center justify-center gap-1 py-1 sticky top-0 z-10 bg-sidebar border-b border-sidebar-border">
-            {quickActions.map((action) => (
-              <Tooltip key={action.label}>
-                <TooltipTrigger asChild>
-                  <button
-                    onClick={action.action}
-                    className="text-sidebar-foreground/70 hover:text-sidebar-foreground hover:bg-sidebar-accent rounded p-1.5 transition-colors"
-                  >
-                    <action.icon className="size-4" />
-                  </button>
-                </TooltipTrigger>
-                <TooltipContent side="bottom">{action.label}</TooltipContent>
-              </Tooltip>
-            ))}
-            <VoiceNoteButton onNoteCreated={onVoiceNoteCreated} />
-            <Tooltip>
-              <TooltipTrigger asChild>
-                <button
-                  onClick={isExpanded ? actions.collapseAll : actions.expandAll}
-                  className="text-sidebar-foreground/70 hover:text-sidebar-foreground hover:bg-sidebar-accent rounded p-1.5 transition-colors"
-                >
-                  {isExpanded ? (
-                    <ChevronsDownUp className="size-4" />
-                  ) : (
-                    <ChevronsUpDown className="size-4" />
-                  )}
-                </button>
-              </TooltipTrigger>
-              <TooltipContent side="bottom">
-                {isExpanded ? "Collapse All" : "Expand All"}
-              </TooltipContent>
-            </Tooltip>
-          </div>
-          <SidebarGroupContent className="flex-1 overflow-y-auto">
-            <div ref={treeContainerRef}>
-              <SidebarMenu>
-                {visibleTree.map((item, index) => (
-                  <Tree
-                    key={index}
-                    item={item}
-                    selectedPath={selectedPath}
-                    expandedPaths={expandedPaths}
-                    onSelect={handleSelect}
-                    onToggleFolder={onToggleFolder}
-                    actions={wrappedActions}
-                    selectedFolderPath={selectedFolderPath}
-                    renameTarget={renameTarget}
-                    onRenameTargetConsumed={() => setRenameTarget(null)}
-                  />
-                ))}
-              </SidebarMenu>
-            </div>
-          </SidebarGroupContent>
-        </SidebarGroup>
-      </ContextMenuTrigger>
-      <ContextMenuContent className="w-48">
-        <ContextMenuItem onClick={() => wrappedActions.createNote()}>
-          <FilePlus className="mr-2 size-4" />
-          New Note
-        </ContextMenuItem>
-        <ContextMenuItem onClick={() => void wrappedActions.createFolder()}>
-          <FolderPlus className="mr-2 size-4" />
-          New Folder
-        </ContextMenuItem>
-      </ContextMenuContent>
-    </ContextMenu>
-  )
+function formatMeetingTime(event: UpcomingMeeting): string {
+  if (event.isAllDay) return 'All day'
+  const now = new Date()
+  const tomorrow = new Date(now)
+  tomorrow.setDate(tomorrow.getDate() + 1)
+  const time = event.start.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })
+  if (isSameLocalDay(event.start, now)) return time
+  if (isSameLocalDay(event.start, tomorrow)) return `Tmrw ${time}`
+  return event.start.toLocaleDateString([], { month: 'numeric', day: 'numeric' })
 }
 
-function countFiles(node: TreeNode): number {
-  if (node.kind === 'file') return 1
-  return (node.children ?? []).reduce((sum, child) => sum + countFiles(child), 0)
+function triggerMeetingCapture(event: UpcomingMeeting, openConference: boolean) {
+  window.__pendingCalendarEvent = {
+    summary: event.summary,
+    start: event.rawStart,
+    end: event.rawEnd,
+    location: event.location ?? undefined,
+    htmlLink: event.htmlLink ?? undefined,
+    conferenceLink: event.conferenceLink ?? undefined,
+    source: event.source,
+  }
+  if (openConference && event.conferenceLink) {
+    window.open(event.conferenceLink, '_blank')
+  }
+  window.dispatchEvent(new Event('calendar-block:join-meeting'))
 }
 
-/** Display name overrides for top-level knowledge folders */
-const FOLDER_DISPLAY_NAMES: Record<string, string> = {}
-
-// Tree component for file browser
-function Tree({
-  item,
-  selectedPath,
-  expandedPaths,
-  onSelect,
-  onToggleFolder,
-  actions,
-  selectedFolderPath,
-  renameTarget,
-  onRenameTargetConsumed,
-}: {
-  item: TreeNode
-  selectedPath: string | null
-  expandedPaths: Set<string>
-  onSelect: (path: string, kind: "file" | "dir") => void
-  onToggleFolder?: (path: string) => void
-  actions: KnowledgeActions
-  selectedFolderPath?: string | null
-  renameTarget?: string | null
-  onRenameTargetConsumed?: () => void
-}) {
-  const isDir = item.kind === 'dir'
-  const isExpanded = expandedPaths.has(item.path)
-  const isSelected = selectedPath === item.path
-  const isFolderSelected = isDir && selectedFolderPath === item.path
-  const [isRenaming, setIsRenaming] = useState(false)
-  const isSubmittingRef = React.useRef(false)
-  const displayName = (isDir && FOLDER_DISPLAY_NAMES[item.name]) || item.name
-
-  // For files, strip .md extension for editing
-  const baseName = !isDir && item.name.endsWith('.md')
-    ? item.name.slice(0, -3)
-    : item.name
-  const [newName, setNewName] = useState(baseName)
-
-  // Auto-enter rename mode when this node is the rename target
-  React.useEffect(() => {
-    if (renameTarget === item.path) {
-      setNewName(baseName)
-      isSubmittingRef.current = false
-      setIsRenaming(true)
-      onRenameTargetConsumed?.()
-    }
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [renameTarget, item.path])
-
-  // Sync newName when baseName changes (e.g., after external rename)
-  React.useEffect(() => {
-    setNewName(baseName)
-  }, [baseName])
-
-  const handleRename = async () => {
-    // Prevent double submission
-    if (isSubmittingRef.current) return
-    isSubmittingRef.current = true
-
-    const trimmedName = newName.trim()
-    if (trimmedName && trimmedName !== baseName) {
-      try {
-        await actions.rename(item.path, trimmedName, isDir)
-        toast('Renamed successfully', 'success')
-      } catch {
-        toast('Failed to rename', 'error')
-      }
-    }
-    setIsRenaming(false)
-    // Reset after a small delay to prevent blur from re-triggering
-    setTimeout(() => {
-      isSubmittingRef.current = false
-    }, 100)
-  }
-
-  const handleDelete = async () => {
-    try {
-      await actions.remove(item.path)
-      toast('Moved to trash', 'success')
-    } catch {
-      toast('Failed to delete', 'error')
-    }
-  }
-
-  const handleCopyPath = () => {
-    actions.copyPath(item.path)
-    toast('Path copied', 'success')
-  }
-
-  const cancelRename = () => {
-    isSubmittingRef.current = true // Prevent blur from triggering rename
-    setIsRenaming(false)
-    setNewName(baseName) // Reset to original name
-    setTimeout(() => {
-      isSubmittingRef.current = false
-    }, 100)
-  }
-
-  const contextMenuContent = (
-    <ContextMenuContent className="w-48">
-      {isDir && (
-        <>
-          <ContextMenuItem onClick={() => actions.createNote(item.path)}>
-            <FilePlus className="mr-2 size-4" />
-            New Note
-          </ContextMenuItem>
-          <ContextMenuItem onClick={() => actions.createFolder(item.path)}>
-            <FolderPlus className="mr-2 size-4" />
-            New Folder
-          </ContextMenuItem>
-          <ContextMenuSeparator />
-        </>
-      )}
-      {!isDir && actions.onOpenInNewTab && (
-        <>
-          <ContextMenuItem onClick={() => actions.onOpenInNewTab!(item.path)}>
-            <ExternalLink className="mr-2 size-4" />
-            Open in new tab
-          </ContextMenuItem>
-          <ContextMenuSeparator />
-        </>
-      )}
-      <ContextMenuItem onClick={handleCopyPath}>
-        <Copy className="mr-2 size-4" />
-        Copy Path
-      </ContextMenuItem>
-      <ContextMenuItem onClick={() => actions.revealInFileManager(item.path, isDir)}>
-        <FolderOpen className="mr-2 size-4" />
-        Open in {getFileManagerName()}
-      </ContextMenuItem>
-      <ContextMenuSeparator />
-      <ContextMenuItem onClick={() => { setNewName(baseName); isSubmittingRef.current = false; setIsRenaming(true) }}>
-        <Pencil className="mr-2 size-4" />
-        Rename
-      </ContextMenuItem>
-      <ContextMenuItem variant="destructive" onClick={handleDelete}>
-        <Trash2 className="mr-2 size-4" />
-        Delete
-      </ContextMenuItem>
-    </ContextMenuContent>
-  )
-
-  // Inline rename input
-  if (isRenaming) {
-    return (
-      <SidebarMenuItem>
-        <div className="flex items-center px-2 py-1">
-          <Input
-            value={newName}
-            onChange={(e) => setNewName(e.target.value)}
-            onKeyDown={async (e) => {
-              e.stopPropagation()
-              if (e.key === 'Enter') {
-                e.preventDefault()
-                await handleRename()
-              } else if (e.key === 'Escape') {
-                e.preventDefault()
-                cancelRename()
-              }
-            }}
-            onBlur={() => {
-              // Only trigger rename if not already submitting
-              if (!isSubmittingRef.current) {
-                handleRename()
-              }
-            }}
-            className="h-6 text-sm flex-1"
-            autoFocus
-          />
-        </div>
-      </SidebarMenuItem>
-    )
-  }
-
-  // Top-level knowledge folders open bases view — render as flat items
-  const parts = item.path.split('/')
-  const isBasesFolder = isDir && parts.length === 2 && parts[0] === 'knowledge'
-
-  if (isBasesFolder) {
-    return (
-      <ContextMenu>
-        <ContextMenuTrigger asChild>
-          <SidebarMenuItem className="group/file-item">
-            <SidebarMenuButton isActive={isFolderSelected} onClick={() => onSelect(item.path, item.kind)}>
-              <Folder className="size-4 shrink-0" />
-              <div className="flex w-full items-center gap-1 min-w-0">
-                <span className="min-w-0 flex-1 truncate">{displayName}</span>
-                <span className="text-xs text-sidebar-foreground/50 tabular-nums shrink-0">{countFiles(item)}</span>
-              </div>
-            </SidebarMenuButton>
-            {onToggleFolder && (item.children?.length ?? 0) > 0 && (
-              <SidebarMenuAction
-                showOnHover
-                aria-label={isExpanded ? "Collapse folder" : "Expand folder"}
-                onClick={(e) => {
-                  e.stopPropagation()
-                  onToggleFolder(item.path)
-                }}
-              >
-                <ChevronRight
-                  className={cn(
-                    "transition-transform",
-                    isExpanded && "rotate-90",
-                  )}
-                />
-              </SidebarMenuAction>
-            )}
-            {isExpanded && (
-              <SidebarMenuSub>
-                {(item.children ?? []).map((subItem, index) => (
-                  <Tree
-                    key={index}
-                    item={subItem}
-                    selectedPath={selectedPath}
-                    expandedPaths={expandedPaths}
-                    onSelect={onSelect}
-                    onToggleFolder={onToggleFolder}
-                    actions={actions}
-                    selectedFolderPath={selectedFolderPath}
-                    renameTarget={renameTarget}
-                    onRenameTargetConsumed={onRenameTargetConsumed}
-                  />
-                ))}
-              </SidebarMenuSub>
-            )}
-          </SidebarMenuItem>
-        </ContextMenuTrigger>
-        {contextMenuContent}
-      </ContextMenu>
-    )
-  }
-
-  if (!isDir) {
-    return (
-      <ContextMenu>
-        <ContextMenuTrigger asChild>
-          <SidebarMenuItem
-            className="group/file-item"
-            data-knowledge-file-path={item.path}
-            data-knowledge-active={isSelected ? "true" : "false"}
-          >
-            <SidebarMenuButton
-              isActive={isSelected}
-              onClick={(e) => {
-                if (e.metaKey && actions.onOpenInNewTab) {
-                  actions.onOpenInNewTab(item.path)
-                } else {
-                  onSelect(item.path, item.kind)
-                }
-              }}
-            >
-              <div className="flex w-full items-center gap-1 min-w-0">
-                <span className="min-w-0 flex-1 truncate">{item.name}</span>
-              </div>
-            </SidebarMenuButton>
-          </SidebarMenuItem>
-        </ContextMenuTrigger>
-        {contextMenuContent}
-      </ContextMenu>
-    )
-  }
-
-  return (
-    <ContextMenu>
-      <ContextMenuTrigger asChild>
-        <SidebarMenuItem>
-          <Collapsible
-            open={isExpanded}
-            onOpenChange={() => onSelect(item.path, item.kind)}
-            className="group/collapsible [&[data-state=open]>button>svg:first-child]:rotate-90"
-          >
-            <CollapsibleTrigger asChild>
-              <SidebarMenuButton isActive={isFolderSelected}>
-                <ChevronRight className="transition-transform size-4" />
-                <div className="flex w-full items-center gap-1 min-w-0">
-                  <span className="min-w-0 flex-1 truncate">{displayName}</span>
-                  <span className="text-xs text-sidebar-foreground/50 tabular-nums shrink-0">{countFiles(item)}</span>
-                </div>
-              </SidebarMenuButton>
-            </CollapsibleTrigger>
-            <CollapsibleContent>
-              <SidebarMenuSub>
-                {(item.children ?? []).map((subItem, index) => (
-                  <Tree
-                    key={index}
-                    item={subItem}
-                    selectedPath={selectedPath}
-                    expandedPaths={expandedPaths}
-                    onSelect={onSelect}
-                    onToggleFolder={onToggleFolder}
-                    actions={actions}
-                    selectedFolderPath={selectedFolderPath}
-                    renameTarget={renameTarget}
-                    onRenameTargetConsumed={onRenameTargetConsumed}
-                  />
-                ))}
-              </SidebarMenuSub>
-            </CollapsibleContent>
-          </Collapsible>
-        </SidebarMenuItem>
-      </ContextMenuTrigger>
-      {contextMenuContent}
-    </ContextMenu>
-  )
+type SidebarEmailThread = {
+  threadId: string
+  subject: string
+  from: string
+  date: string
 }
 
-// Get status indicator color
-function getStatusColor(status?: string, enabled?: boolean): string {
-  // Disabled agents always show gray
-  if (enabled === false) {
-    return "bg-gray-400"
-  }
-  switch (status) {
-    case "running":
-      return "bg-blue-500"
-    case "finished":
-      return "bg-green-500"
-    case "failed":
-      return "bg-red-500"
-    case "triggered":
-      return "bg-gray-400"
-    case "scheduled":
-    default:
-      return "bg-yellow-500"
-  }
-}
-
-// Tasks Section
-function TasksSection({
-  runs,
-  currentRunId,
-  processingRunIds,
-  actions,
-  backgroundTasks = [],
-  selectedBackgroundTask,
-}: {
-  runs: RunListItem[]
-  currentRunId?: string | null
-  processingRunIds?: Set<string>
-  actions?: TasksActions
-  backgroundTasks?: BackgroundTaskItem[]
-  selectedBackgroundTask?: string | null
-}) {
-  const [pendingDeleteRunId, setPendingDeleteRunId] = useState<string | null>(null)
-
-  return (
-    <SidebarGroup className="flex-1 flex flex-col overflow-hidden">
-      <SidebarGroupContent className="flex-1 overflow-y-auto">
-        {/* Background Tasks Section */}
-        {backgroundTasks.length > 0 && (
-          <>
-            <div className="px-3 py-1.5 text-xs font-medium text-muted-foreground">
-              Background Tasks
-            </div>
-            <SidebarMenu>
-              {backgroundTasks.map((task) => (
-                <SidebarMenuItem key={task.name}>
-                  <SidebarMenuButton
-                    isActive={selectedBackgroundTask === task.name}
-                    onClick={() => actions?.onSelectBackgroundTask?.(task.name)}
-                    className="gap-2"
-                  >
-                    <div className="relative">
-                      <Bot className="size-4 shrink-0" />
-                      <span
-                        className={`absolute -bottom-0.5 -right-0.5 size-2 rounded-full ${getStatusColor(task.status, task.enabled)} ${task.status === "running" && task.enabled ? "animate-pulse" : ""}`}
-                      />
-                    </div>
-                    <span className={`truncate text-sm ${!task.enabled ? "text-muted-foreground" : ""}`}>
-                      {task.name}
-                    </span>
-                  </SidebarMenuButton>
-                </SidebarMenuItem>
-              ))}
-            </SidebarMenu>
-          </>
-        )}
-        {runs.length > 0 && (
-          <>
-            <div className="px-3 py-1.5 mt-4 text-xs font-medium text-muted-foreground">
-              Chat history
-            </div>
-            <SidebarMenu>
-              {runs.map((run) => (
-                <ContextMenu key={run.id}>
-                  <ContextMenuTrigger asChild>
-                    <SidebarMenuItem className="group/chat-item">
-                      <SidebarMenuButton
-                        isActive={currentRunId === run.id}
-                        onClick={(e) => {
-                          if (e.metaKey && actions?.onOpenInNewTab) {
-                            actions.onOpenInNewTab(run.id)
-                          } else {
-                            actions?.onSelectRun(run.id)
-                          }
-                        }}
-                      >
-                        <div className="flex w-full items-center gap-2 min-w-0">
-                          <span className="min-w-0 flex-1 truncate text-sm">{run.title || '(Untitled chat)'}</span>
-                          {run.createdAt ? (
-                            <span className="shrink-0 text-[10px] text-muted-foreground">
-                              {formatRunTime(run.createdAt)}
-                            </span>
-                          ) : null}
-                        </div>
-                      </SidebarMenuButton>
-                    </SidebarMenuItem>
-                  </ContextMenuTrigger>
-                  <ContextMenuContent className="w-48">
-                    {actions?.onOpenInNewTab && (
-                      <ContextMenuItem onClick={() => actions.onOpenInNewTab!(run.id)}>
-                        <ExternalLink className="mr-2 size-4" />
-                        Open in new tab
-                      </ContextMenuItem>
-                    )}
-                    {!processingRunIds?.has(run.id) && (
-                      <>
-                        {actions?.onOpenInNewTab && <ContextMenuSeparator />}
-                        <ContextMenuItem
-                          variant="destructive"
-                          onClick={() => setPendingDeleteRunId(run.id)}
-                        >
-                          <Trash2 className="mr-2 size-4" />
-                          Delete
-                        </ContextMenuItem>
-                      </>
-                    )}
-                  </ContextMenuContent>
-                </ContextMenu>
-              ))}
-            </SidebarMenu>
-          </>
-        )}
-      </SidebarGroupContent>
-
-      {/* Delete confirmation dialog */}
-      <Dialog open={!!pendingDeleteRunId} onOpenChange={(open) => { if (!open) setPendingDeleteRunId(null) }}>
-        <DialogContent showCloseButton={false} className="sm:max-w-sm">
-          <DialogHeader>
-            <DialogTitle>Delete chat</DialogTitle>
-            <DialogDescription>
-              Are you sure you want to delete this chat?
-            </DialogDescription>
-          </DialogHeader>
-          <DialogFooter>
-            <Button variant="outline" size="sm" onClick={() => setPendingDeleteRunId(null)}>
-              Cancel
-            </Button>
-            <Button
-              variant="destructive"
-              size="sm"
-              onClick={() => {
-                if (pendingDeleteRunId) {
-                  actions?.onDeleteRun(pendingDeleteRunId)
-                }
-                setPendingDeleteRunId(null)
-              }}
-            >
-              Delete
-            </Button>
-          </DialogFooter>
-        </DialogContent>
-      </Dialog>
-    </SidebarGroup>
-  )
+function formatEmailFrom(from: string): string {
+  const match = /^\s*"?([^"<]+?)"?\s*<.+>\s*$/.exec(from)
+  if (match) return match[1].trim()
+  return from
 }

@@ -70,7 +70,7 @@ The `once` trigger from the prior model has been **dropped** — it didn't fit t
 Two paths, both producing identical on-disk YAML:
 
 1. **Hand-written** — type the `live:` block directly into the note's frontmatter. The scheduler picks it up on its next 15-second tick.
-2. **Sidebar chat** — mention a note (or have it attached) and ask Copilot for something dynamic. Copilot is tuned to recognize a wide range of phrasings beyond "live" or "track" (see "Prompts Catalog → Copilot trigger paragraph"); it loads the `live-note` skill, edits the frontmatter via `workspace-edit`, then **runs the agent once by default** so the user immediately sees content. The auto-run is skipped only when the user explicitly says not to run yet.
+2. **Sidebar chat** — mention a note (or have it attached) and ask Copilot for something dynamic. Copilot is tuned to recognize a wide range of phrasings beyond "live" or "track" (see "Prompts Catalog → Copilot trigger paragraph"); it loads the `live-note` skill, edits the frontmatter via `file-editText`, then **runs the agent once by default** so the user immediately sees content. The auto-run is skipped only when the user explicitly says not to run yet.
 
 When the note is **already live** and the user asks to track something new, Copilot extends the existing `live.objective` in natural-language prose. It does not create a second `live:` block.
 
@@ -92,8 +92,8 @@ When a trigger fires, the live-note agent receives a short message:
 - For event runs only: the matching `eventMatchCriteria` text and the event payload, with a Pass-2 decision directive ("only edit if the event genuinely warrants it").
 
 The agent's system prompt tells it to:
-1. Call `workspace-readFile` to read the current note (the body may be long; no body snapshot is passed in the message — fetch fresh).
-2. Make small, **patch-style** edits with `workspace-edit` — change one region, re-read, change the next region — rather than one-shot rewrites.
+1. Call `file-readText` to read the current note (the body may be long; no body snapshot is passed in the message — fetch fresh).
+2. Make small, **patch-style** edits with `file-editText` — change one region, re-read, change the next region — rather than one-shot rewrites.
 3. Follow default body structure unless the objective overrides: H1 stays the title; a 1-3 sentence rolling summary at the top; H2 sub-topic sections below, freshest first.
 4. Never modify YAML frontmatter — that's owned by the user and the runtime.
 5. End with a 1-2 sentence summary stored as `lastRunSummary`.
@@ -115,7 +115,7 @@ Backend (main process)
   ├─ Event processor (5 s)  ──┼──► runLiveNoteAgent() ──► live-note-agent
   └─ Builtin tool             │                                     │
      run-live-note-agent  ────┘                                     ▼
-                                                  workspace-readFile / -edit
+                                                  file-readText / -edit
                                                                     │
                                                                     ▼
                                                   body region(s) rewritten on disk
@@ -249,7 +249,7 @@ The contract (defined in the run-agent system prompt — `packages/core/src/know
   - Then content organized by sub-topic under H2 headings, freshest/most-important first.
   - Tightness over decoration.
 - **Override** — if the objective specifies a different layout (e.g. "show the top 5 stories at the top, with a one-paragraph summary above them"), follow that exactly.
-- **Patch-style updates** — make small, incremental `workspace-edit` calls (read → edit one region → re-read → next), not one-shot whole-body rewrites. This preserves user-added content the agent didn't account for and keeps diffs reviewable.
+- **Patch-style updates** — make small, incremental `file-editText` calls (read → edit one region → re-read → next), not one-shot whole-body rewrites. This preserves user-added content the agent didn't account for and keeps diffs reviewable.
 - **Boundaries**: never modify the frontmatter; the agent is the sole writer of the body below the H1.
 
 ---
@@ -316,7 +316,7 @@ Every LLM-facing prompt in the feature, with file pointers. After any edit: `cd 
 - **Purpose**: the user message seeded into each agent run.
 - **File**: `packages/core/src/knowledge/live-note/runner.ts` (`buildMessage`).
 - **Inputs**: `filePath` (presented as `knowledge/${filePath}` in the message), `live.objective`, `live.triggers?.eventMatchCriteria` (only on event runs), `trigger`, optional `context`, plus `localNow` / `tz`.
-- **Behavior**: tells the agent to call `workspace-readFile` itself (no body snapshot included, since the body can be long and may have been edited by a concurrent run) and to make patch-style edits.
+- **Behavior**: tells the agent to call `file-readText` itself (no body snapshot included, since the body can be long and may have been edited by a concurrent run) and to make patch-style edits.
 
 Three branches by `trigger`:
 - **`manual`** — base message. If `context` is passed, it's appended as a `**Context:**` section. The `run-live-note-agent` tool uses this path for both plain refreshes and context-biased backfills.
@@ -326,7 +326,7 @@ Three branches by `trigger`:
 ### 5. Live Note skill (Copilot-facing)
 
 - **Purpose**: teaches Copilot the `live:` model — operational posture (act-first), the strong/medium/anti-signal taxonomy and how to act on each, the **always-extend-not-fork** rule for already-live notes, user-facing language (call them "live notes"; surface the **Live Note panel** by name), the auto-run-once-on-create/edit default, schema, triggers, YAML-safety rules, insertion workflow, and the `run-live-note-agent` tool with `context` backfills.
-- **File**: `packages/core/src/application/assistant/skills/live-note/skill.ts`. Exported `skill` constant.
+- **File**: `packages/core/src/runtime/assembly/skills/live-note/skill.ts`. Exported `skill` constant.
 - **Schema interpolation**: at module load, `stringifyYaml(z.toJSONSchema(LiveNoteSchema))` is interpolated into the "Canonical Schema" section. Edits to `LiveNoteSchema` propagate automatically.
 - **Output**: markdown, injected into the Copilot system prompt when `loadSkill('live-note')` fires.
 - **Invoked by**: Copilot's `loadSkill` builtin tool. Registration in `skills/index.ts`.
@@ -334,7 +334,7 @@ Three branches by `trigger`:
 ### 6. Copilot trigger paragraph
 
 - **Purpose**: tells Copilot *when* to load the `live-note` skill, and frames how aggressively to act once loaded.
-- **File**: `packages/core/src/application/assistant/instructions.ts` (look for the "Live Notes" paragraph).
+- **File**: `packages/core/src/runtime/assembly/copilot/instructions.ts` (look for the "Live Notes" paragraph).
 - **Strong signals (load + act without asking)**: cadence words ("every morning / daily / hourly…"), living-document verbs ("keep a running summary of…", "maintain a digest of…"), watch/monitor verbs, pin-live framings ("always show the latest X here"), direct ("track / follow X"), event-conditional ("whenever a relevant email comes in…").
 - **Medium signals (load + answer the one-off + offer)**: time-decaying questions ("what's the weather?", "USD/INR right now?", "service X status?"), note-anchored snapshots ("show me my schedule here"), recurring artifacts ("morning briefing", "weekly review", "Acme dashboard"), topic-following / catch-up.
 - **Anti-signals (do NOT make live)**: definitional questions, one-off lookups, manual document editing.
@@ -343,7 +343,7 @@ Three branches by `trigger`:
 ### 7. `run-live-note-agent` tool — `context` parameter description
 
 - **Purpose**: a mini-prompt (a Zod `.describe()`) that guides Copilot on when to pass extra context for a run.
-- **File**: `packages/core/src/application/lib/builtin-tools.ts` (the `run-live-note-agent` tool definition).
+- **File**: `packages/core/src/runtime/tools/catalog.ts` (the `run-live-note-agent` tool definition).
 - **Inputs**: `filePath` (workspace-relative; the tool strips the `knowledge/` prefix internally), optional `context`.
 - **Output**: flows into `runLiveNoteAgent(..., 'manual')` → `buildMessage` → appended as `**Context:**` in the agent message.
 - **Key use case**: backfill a newly-made-live note so its body isn't empty on day 1.
@@ -394,10 +394,10 @@ Conventions:
 | Deprecated Today.md one-time migration | `packages/core/src/knowledge/deprecate_today_note.ts` |
 | Gmail event producer | `packages/core/src/knowledge/sync_gmail.ts` |
 | Calendar event producer + digest | `packages/core/src/knowledge/sync_calendar.ts` |
-| Copilot skill | `packages/core/src/application/assistant/skills/live-note/skill.ts` |
-| Skill registration | `packages/core/src/application/assistant/skills/index.ts` |
-| Copilot trigger paragraph | `packages/core/src/application/assistant/instructions.ts` |
-| `run-live-note-agent` builtin tool | `packages/core/src/application/lib/builtin-tools.ts` |
+| Copilot skill | `packages/core/src/runtime/assembly/skills/live-note/skill.ts` |
+| Skill registration | `packages/core/src/runtime/assembly/skills/index.ts` |
+| Copilot trigger paragraph | `packages/core/src/runtime/assembly/copilot/instructions.ts` |
+| `run-live-note-agent` builtin tool | `packages/core/src/runtime/tools/catalog.ts` |
 | Editor toolbar (Radio button → panel) | `apps/renderer/src/components/editor-toolbar.tsx` |
 | Live Note panel (single-view editor) | `apps/renderer/src/components/live-note-sidebar.tsx` |
 | Status hook (`useLiveNoteAgentStatus`) | `apps/renderer/src/hooks/use-live-note-agent-status.ts` |
